@@ -1,0 +1,67 @@
+########################################
+# Python
+########################################
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+########################################
+# Node / Electron / Vite
+########################################
+node_modules/
+ui_electron/node_modules/
+ui_electron/dist/
+ui_electron/dist-electron/
+ui_electron/.vite/
+ui_electron/.cache/
+ui_electron/*.log
+
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+########################################
+# Runtime / local state (核心不提交)
+########################################
+.galrec/
+progress.json
+
+########################################
+# User data (强制不提交)
+########################################
+games/
+sequences/
+templates/
+output/
+
+########################################
+# Media / large assets
+########################################
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.bmp
+*.mkv
+*.mp4
+*.avi
+*.mov
+*.wav
+*.mp3
+
+########################################
+# Experimental / local notebooks
+########################################
+*.ipynb
+
+########################################
+# OS / Editor
+########################################
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
