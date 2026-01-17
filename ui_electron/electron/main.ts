@@ -6,6 +6,7 @@ import { fileURLToPath } from "url";
 
 let win: BrowserWindow | null = null;
 let pyProc: ChildProcessWithoutNullStreams | null = null;
+let roiWin: BrowserWindow | null = null;
 
 // ESM 下没有 __dirname，这样取
 const __filename = fileURLToPath(import.meta.url);
@@ -15,6 +16,37 @@ const __dirname = path.dirname(__filename);
 // PROJECT_BASE = 回到项目根目录 gameCG_recoder
 const PROJECT_BASE = path.resolve(__dirname, "..", "..");
 const RUNTIME_PATH = path.join(PROJECT_BASE, ".galrec", "runtime.json");
+
+function openRoiOverlay() {
+  if (roiWin) {
+    roiWin.focus();
+    return;
+  }
+
+  roiWin = new BrowserWindow({
+    fullscreen: true,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    // 需要接收鼠标拖拽，所以必须 focusable
+    focusable: true,
+    hasShadow: false,
+    webPreferences: {
+      preload: path.join(__dirname, "roi", "preload_roi.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  roiWin.setAlwaysOnTop(true, "screen-saver");
+  roiWin.loadFile(path.join(__dirname, "roi", "roi_overlay.html"));
+
+  roiWin.on("closed", () => {
+    roiWin = null;
+  });
+}
 
 function sleep(ms: number) {
   return new Promise((res) => setTimeout(res, ms));

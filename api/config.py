@@ -228,6 +228,9 @@ def get_config():
 
 @router.put("")
 def put_config(req: PutConfigReq):
+    """
+    保存 Config，并同步 game_window_title 到 Registry。
+    """
     root = _active_root()
     path = _config_path(root)
 
@@ -239,7 +242,30 @@ def put_config(req: PutConfigReq):
 
     # return merged view
     cfg2 = _normalize_legacy(_read_yaml(path))
+    # 注意：这里需要 _runner_default_config，请确保它在作用域内
+
     cfg2 = _merge_defaults(cfg2, _runner_default_config())
+
+    # ✅【新增】同步回 Registry
+    new_title = cfg.get("game_window_title")
+    if new_title:
+        try:
+            reg = GameRegistry(BASE_DIR)
+            active_key = reg.get_active_key()
+            if active_key:
+                # 获取当前 registry 中的信息，保留 root 和 title，只更新 window_title
+                games = reg.list_games()
+                if active_key in games:
+                    g = games[active_key]
+                    reg.upsert_game(
+                        key=active_key,
+                        root=g.root,
+                        title=g.title,
+                        window_title=str(new_title)
+                    )
+        except Exception as e:
+            print(f"[Warn] Failed to sync registry window_title: {e}")
+
     return {"ok": True, "config": cfg2}
 
 

@@ -30,21 +30,32 @@ def click_rel(rect: Rect, rx: float, ry: float, interval: float = 0.18):
 
     time.sleep(interval)
 
-def press_enter(interval: float = 0.18):
+def press_key(key_name: str, interval: float = 0.18, duration: float = 0.05):
     """
-    回车推进（对部分游戏比鼠标更稳）
+    按键推进。
+    关键修复：增加 duration (按住时长)，防止游戏帧率低时检测不到按键。
     """
-    pdi.press("enter")
+    try:
+        pdi.keyDown(key_name)
+        time.sleep(duration) # 保持按住状态至少 50ms
+        pdi.keyUp(key_name)
+    except Exception:
+        # fallback: 有些特殊键名 pydirectinput 可能报错，尝试普通 press
+        pdi.press(key_name)
+    
     time.sleep(interval)
 
 def advance(rect: Rect, method: str, rx: float, ry: float, interval: float = 0.18):
     """
-    method: mouse_left | enter
+    method: mouse_left | enter | space
     rx, ry: 相对坐标，仅 mouse_left 用到
     """
     if method == "mouse_left":
         click_rel(rect, rx, ry, interval=interval)
     elif method == "enter":
-        press_enter(interval=interval)
+        press_key("enter", interval=interval)
+    elif method == "space":
+        press_key("space", interval=interval)
     else:
-        raise ValueError(f"未知推进方式: {method}")
+        # 允许直接传键名，如 'z', 'ctrl' 等
+        press_key(method, interval=interval)

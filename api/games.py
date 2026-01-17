@@ -246,30 +246,37 @@ def open_game(req: OpenGameReq):
 @router.post("")
 def upsert_game(req: UpsertGameReq):
     """
-    新建/更新 registry 记录（并可自动创建目录结构）
+    新建/更新 registry 记录（并可自动创建目录结构）。
+    ✅【新增】反向同步：如果 Config 文件存在，把 Registry 里的 window_title 写进去。
     """
-    reg = _registry()
+    reg = GameRegistry(BASE_DIR) # 使用局部 import 或 helper
 
     try:
-        key = _safe_key(req.key)
+        # 这里为了安全，可以重新引入 _safe_key
+        s = (req.key or "").strip()
+        if not s or not re.fullmatch(r"[A-Za-z0-9_.-]+", s):
+            raise ValueError("invalid key")
+        key = s
     except Exception as e:
         raise HTTPException(400, str(e))
 
     root = (req.root or "").strip()
     if not root:
-        root = _rel_root_for_key(key)
+        root = os.path.join("games", key).replace("\\", "/") # _rel_root_for_key logic
 
-    # root 必须相对，且必须在项目内（避免写入任意目录）
     root = root.replace("\\", "/").strip()
     if os.path.isabs(root):
-        raise HTTPException(400, "root must be a relative path (e.g. games/my_game)")
+        raise HTTPException(400, "root must be a relative path")
 
     abs_root = os.path.abspath(os.path.join(BASE_DIR, root))
     if os.path.commonpath([abs_root, BASE_DIR]) != BASE_DIR:
         raise HTTPException(400, "root must be under project base_dir")
 
     if req.create_dirs:
-        _ensure_game_dirs(abs_root)
+        os.makedirs(abs_root, exist_ok=True)
+        os.makedirs(os.path.join(abs_root, "sequences"), exist_ok=True)
+        os.makedirs(os.path.join(abs_root, "templates"), exist_ok=True)
+        os.makedirs(os.path.join(abs_root, "output"), exist_ok=True)
 
     try:
         reg.upsert_game(key=key, root=root, title=req.title or "", window_title=req.window_title or "")
@@ -278,8 +285,33 @@ def upsert_game(req: UpsertGameReq):
     except Exception as e:
         raise HTTPException(500, f"failed to upsert game: {e}")
 
-    return {"ok": True, "active": reg.get_active_key(), "games": _serialize_games(reg)}
+    # ✅ 同步到 Config 文件
+    if req.window_title:
+        cfg_path = os.path.join(abs_root, "config.yaml")
+        # 兼容旧的 game.yaml
+        game_yaml_path = os.path.join(abs_root, "game.yaml")
+        target_cfg = game_yaml_path if os.path.exists(game_yaml_path) else cfg_path
+        
+        # 只有文件存在时才更新（不自动创建 config，避免覆盖默认逻辑）
+        if os.path.exists(target_cfg):
+            try:
+                with open(target_cfg, "r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f) or {}
+                
+                # 只有当不一样时才写回
+                current_val = data.get("game_window_title")
+                # 也要检查 legacy 字段
+                if not current_val and isinstance(data.get("game"), dict):
+                    current_val = data["game"].get("window_title")
 
+                if current_val != req.window_title:
+                    data["game_window_title"] = req.window_title
+                    with open(target_cfg, "w", encoding="utf-8") as f:
+                        yaml.dump(data, f, allow_unicode=True, sort_keys=False)
+            except Exception as e:
+                print(f"[Warn] Failed to sync config game_window_title: {e}")
+
+    return {"ok": True, "active": reg.get_active_key(), "games": _serialize_games(reg)}
 
 @router.delete("/{key}")
 def delete_game(

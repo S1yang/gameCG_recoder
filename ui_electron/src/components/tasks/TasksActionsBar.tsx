@@ -1,5 +1,14 @@
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
+import { Separator } from "@/components/ui/separator";
+import {
+  Plus,
+  Trash2,
+  RefreshCw,
+  CheckSquare,
+  Square,
+  Play,
+  Layers,
+} from "lucide-react";
 
 type Props = {
   ok: boolean;
@@ -13,14 +22,12 @@ type Props = {
   onCreate: () => void;
   onDelete: () => void;
 
-  // ✅ batch
   selectedCount: number;
   onSelectAll: () => void;
   onSelectNone: () => void;
   onMarkDone: () => void;
   onMarkUndone: () => void;
 
-  // ✅ run
   onRunSelected: () => void;
   onRunAll: () => void;
 };
@@ -31,7 +38,6 @@ export default function TasksActionsBar({
   busyCreate,
   busyDelete,
   selectedId,
-  err,
   onRefresh,
   onCreate,
   onDelete,
@@ -46,72 +52,106 @@ export default function TasksActionsBar({
   onRunAll,
 }: Props) {
   return (
-    <div>
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          {ok ? (
-            <Badge variant="outline">API Ready</Badge>
-          ) : (
-            <Badge variant="secondary">Not ready</Badge>
-          )}
-          <Badge variant="secondary" title="Selected for batch actions">
-            selected: {selectedCount}
-          </Badge>
-        </div>
-
-        <div className="flex items-center gap-2 flex-wrap justify-end">
-          <Button
-            variant="secondary"
-            onClick={onRefresh}
-            disabled={!ok || busyRefresh}
-          >
-            {busyRefresh ? "Refreshing..." : "Refresh"}
-          </Button>
-
-          <Button onClick={onCreate} disabled={!ok || busyCreate}>
-            {busyCreate ? "Creating..." : "+ New"}
-          </Button>
-
-          <Button
-            variant="destructive"
-            onClick={onDelete}
-            disabled={!ok || selectedId == null || busyDelete}
-          >
-            {busyDelete ? "Deleting..." : "Delete"}
-          </Button>
-
-          <Button variant="outline" onClick={onSelectAll} disabled={!ok}>
-            Select All
-          </Button>
-          <Button variant="outline" onClick={onSelectNone} disabled={!ok}>
-            Select None
-          </Button>
-
-          <Button
-            variant="outline"
-            onClick={onMarkDone}
-            disabled={!ok || selectedCount === 0}
-          >
-            Mark Done
-          </Button>
-          <Button
-            variant="outline"
-            onClick={onMarkUndone}
-            disabled={!ok || selectedCount === 0}
-          >
-            Mark Undone
-          </Button>
-
-          <Button onClick={onRunSelected} disabled={!ok || selectedCount === 0}>
-            Run Selected
-          </Button>
-          <Button variant="secondary" onClick={onRunAll} disabled={!ok}>
-            Run All
-          </Button>
-        </div>
+    <div className="flex items-center justify-between p-1 bg-muted/40 rounded-lg border">
+      {/* 左侧：基础管理 */}
+      <div className="flex items-center gap-1">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onRefresh}
+          disabled={!ok || busyRefresh}
+          title="Refresh List"
+        >
+          <RefreshCw
+            className={`w-4 h-4 ${busyRefresh ? "animate-spin" : ""}`}
+          />
+        </Button>
+        <Separator orientation="vertical" className="h-6 mx-1" />
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onCreate}
+          disabled={!ok || busyCreate}
+        >
+          <Plus className="w-4 h-4 mr-1" /> New
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onDelete}
+          disabled={!ok || selectedId == null || busyDelete}
+          className="text-destructive hover:text-destructive"
+        >
+          <Trash2 className="w-4 h-4 mr-1" /> Delete
+        </Button>
       </div>
 
-      {err ? <div className="mt-3 text-sm text-destructive">{err}</div> : null}
+      {/* 中间：批量选择与状态 */}
+      <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 bg-background rounded border px-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            onClick={onSelectAll}
+            disabled={!ok}
+            title="Select All"
+          >
+            <CheckSquare className="w-4 h-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            onClick={onSelectNone}
+            disabled={!ok}
+            title="Select None"
+          >
+            <Square className="w-4 h-4" />
+          </Button>
+        </div>
+
+        {selectedCount > 0 && (
+          <>
+            <span className="text-xs text-muted-foreground mx-2">
+              {selectedCount} selected
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onMarkDone}
+              disabled={!ok}
+              className="h-7 text-xs"
+            >
+              Mark Done
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onMarkUndone}
+              disabled={!ok}
+              className="h-7 text-xs"
+            >
+              Reset Status
+            </Button>
+          </>
+        )}
+      </div>
+
+      {/* 右侧：运行控制 */}
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm"
+          onClick={onRunSelected}
+          disabled={!ok || selectedCount === 0}
+          className={selectedCount > 0 ? "animate-pulse" : ""}
+        >
+          <Play className="w-3 h-3 mr-1" /> Run Selected
+        </Button>
+        <Button size="sm" variant="secondary" onClick={onRunAll} disabled={!ok}>
+          <Layers className="w-3 h-3 mr-1" /> Run All
+        </Button>
+      </div>
     </div>
   );
 }

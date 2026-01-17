@@ -3,25 +3,24 @@ import os
 import json
 import time
 import glob
-from threading import Event
+import ctypes  # ✅ 用于监听键盘
+from threading import Event, Thread
 from typing import Optional, Callable, Dict, Any, Tuple
 
 import yaml
 import cv2
 import numpy as np
-import pyautogui  # 仅用于 FAILSAFE / 兼容，推进不再用它
+import pyautogui  # 仅用于 FAILSAFE
 
-from ui.window import find_window_rect,activate_window # 你已有
-from ui.clicker import advance          # 你已有：pydirectinput click/enter
-from ui.capture import grab_region_bgr  # 你已有
-from obs.recorder import OBSRecorder    # 你已有
+from ui.window import find_window_rect, activate_window
+from ui.clicker import advance
+from ui.capture import grab_region_bgr
+from obs.recorder import OBSRecorder
 from state import load_progress, set_task_state, save_progress, set_game_root, get_game_root
 from game_registry import GameRegistry
 
-# 用于维护识别系统的一个变量
 _LAST_HIT = {}
 
-# （可选）DPI aware（强烈建议；你已修 ROI，这里加上也不冲突）
 try:
     from ui.dpi import enable_dpi_awareness
     enable_dpi_awareness()
@@ -31,12 +30,10 @@ except Exception:
 PROJECT_BASE = os.path.dirname(os.path.abspath(__file__))
 
 # ---- game root resolution ----
-# 1) prefer env injected by FastAPI (/runner/start)
 env_root = os.environ.get("GALREC_GAME_ROOT", "").strip()
 if env_root:
     set_game_root(env_root)
 
-# 2) if still pointing to PROJECT_BASE, resolve active from registry
 cur_root = os.path.abspath(get_game_root())
 if os.path.abspath(cur_root) == os.path.abspath(PROJECT_BASE):
     active_root = GameRegistry(PROJECT_BASE).resolve_active_root()
@@ -50,12 +47,31 @@ os.makedirs(SEQ_DIR, exist_ok=True)
 os.makedirs(TPL_DIR, exist_ok=True)
 
 
+# ---------- ✅ Global Hotkey (F9) Watcher ----------
+
+def _is_key_pressed(vk_code):
+    # 0x8000 mask means key is currently down
+    return (ctypes.windll.user32.GetAsyncKeyState(vk_code) & 0x8000) != 0
+
+def _watch_global_hotkey(stop_event: Event, log: Callable[[str], None]):
+    """
+    后台线程：监听 F9 键。一旦按下，设置 stop_event。
+    """
+    VK_F9 = 0x78  # Virtual Key Code for F9
+    
+    log("[Input] Panic Key 'F9' is active. Press F9 to STOP immediately.")
+    
+    while not stop_event.is_set():
+        if _is_key_pressed(VK_F9):
+            log("\n[STOP] Panic Key (F9) detected! Stopping runner...")
+            stop_event.set()
+            break
+        time.sleep(0.1)
+
+
 # ---------- small utils ----------
 
 def wait_scene_changed(title_kw: str, ref_bgr, diff_thr: float, hold_hits: int, timeout_sec: float):
-    """
-    等待画面相对 ref_bgr 发生明显变化，连续命中 hold_hits 次视作“已离开入口页”
-    """
     t0 = time.time()
     hits = 0
     last_diff = 0.0
@@ -87,15 +103,12 @@ def click_entry_with_verify(
     scene_change_timeout: float,
     double_click: bool,
 ):
-    """
-    先模板匹配并点击入口，然后验证画面确实离开入口页；否则自动重试
-    """
     for attempt in range(1, retries + 1):
         ok = click_template_in_window(
             title_kw=title_kw,
             tmpl_path=entry_tmpl_path,
             thr=enter_thr,
-            retries=1,                 # 单次只尝试一次命中点击
+            retries=1,
             retry_sleep=retry_sleep,
             log=log,
         )
@@ -105,10 +118,8 @@ def click_entry_with_verify(
             continue
 
         if double_click:
-            # 简化做法：再匹配一次并点一次
             click_template_in_window(title_kw, entry_tmpl_path, enter_thr, 1, retry_sleep, log)
 
-        # ✅ 验证画面离开入口页
         changed, last_diff = wait_scene_changed(
             title_kw, ref_before_enter,
             diff_thr=scene_change_diff_thr,
@@ -133,11 +144,9 @@ def _clamp01(x: float, eps: float = 0.01) -> float:
     return x
 
 def grab_window_bgr(rect):
-    """rect in screen coords -> BGR image"""
     return grab_region_bgr(rect.left, rect.top, rect.width, rect.height)
 
 def mean_abs_diff(a_bgr, b_bgr):
-    """mean abs diff, resize defensive"""
     if a_bgr is None or b_bgr is None:
         return 1e9
     if a_bgr.shape != b_bgr.shape:
@@ -146,13 +155,6 @@ def mean_abs_diff(a_bgr, b_bgr):
     return float(d.mean())
 
 def match_template_center(img_bgr, tmpl_bgr, threshold=0.80, center_crop=0.70, scales=None):
-    """
-    更稳健匹配：
-    - 模板中心裁剪（忽略边缘背景）
-    - 灰度 + 轻微模糊
-    - 多尺度匹配（解决 UI 缩放/抗锯齿）
-    返回 (cx, cy, score) 或 None
-    """
     if img_bgr is None or tmpl_bgr is None:
         return None
 
@@ -172,7 +174,6 @@ def match_template_center(img_bgr, tmpl_bgr, threshold=0.80, center_crop=0.70, s
     img_g = prep_gray(img_bgr)
     tpl_g0 = prep_gray(tmpl_bgr)
 
-    # 1) 模板中心裁剪
     if 0 < center_crop < 1.0:
         ch = int(th * center_crop)
         cw = int(tw * center_crop)
@@ -183,7 +184,7 @@ def match_template_center(img_bgr, tmpl_bgr, threshold=0.80, center_crop=0.70, s
     else:
         th2, tw2 = tpl_g0.shape[:2]
 
-    best = None  # (cx, cy, score, tw_used, th_used)
+    best = None
 
     for s in scales:
         if abs(s - 1.0) < 1e-6:
@@ -222,7 +223,6 @@ def template_exists_and_read(path: str):
     return cv2.imread(path, cv2.IMREAD_COLOR)
 
 def load_config():
-    # game-level config: prefer game.yaml; fallback to config.yaml
     cfg_path = os.path.join(GAME_ROOT, "game.yaml")
     if not os.path.exists(cfg_path):
         cfg_path = os.path.join(GAME_ROOT, "config.yaml")
@@ -233,8 +233,6 @@ def load_config():
 
 def list_sequences():
     qpath = os.path.join(GAME_ROOT, "queue.yaml")
-
-    # 1) disk scan
     disk_ids = []
     for fp in glob.glob(os.path.join(SEQ_DIR, "*.yaml")):
         bn = os.path.basename(fp)
@@ -244,7 +242,6 @@ def list_sequences():
                 disk_ids.append(int(stem))
     disk_ids = sorted(set(disk_ids))
 
-    # 2) queue order
     order_ids = []
     if os.path.exists(qpath):
         try:
@@ -258,7 +255,6 @@ def list_sequences():
         except Exception:
             order_ids = []
 
-    # 3) merge: queue first + missing disk
     merged = []
     seen = set()
     for x in order_ids:
@@ -268,7 +264,6 @@ def list_sequences():
         if x not in seen:
             merged.append(x); seen.add(x)
 
-    # 4) load yaml dicts in merged order (关键：保持 merged 顺序)
     items = []
     for sid in merged:
         fp = os.path.join(SEQ_DIR, f"{sid:03d}.yaml")
@@ -284,14 +279,6 @@ def list_sequences():
 
 
 def normalize_seq(seq: dict) -> dict:
-    """
-    schema:
-      entry: {mode: gallery|roam, template: "001_entry.png" 或绝对路径}
-      preplay: {actions: [{template, delay, appear_timeout_sec?}, ...]}
-      play: {advance_method: mouse_left|enter, pacing: system|audio, mode?}
-      end: {template: "001_end.png"}
-      record: {basename: "..."}
-    """
     if not isinstance(seq, dict):
         return {}
 
@@ -319,8 +306,6 @@ def normalize_seq(seq: dict) -> dict:
             dly = float(a.get("delay", 0.5))
         except Exception:
             dly = 0.5
-
-        # ✅ 保留 appear_timeout_sec（可选）
         try:
             ato = float(a.get("appear_timeout_sec", 0.0))
         except Exception:
@@ -341,7 +326,6 @@ def normalize_seq(seq: dict) -> dict:
         old = (seq.get("dialogue") or {}).get("advance_method", None)
         play["advance_method"] = old if old else "mouse_left"
     play.setdefault("pacing", "system")
-    # ✅ 预留：play.mode（将来 C 阶段分支用）
     play.setdefault("mode", "default")
     seq["play"] = play
 
@@ -369,12 +353,6 @@ def safe_filename(name: str) -> str:
 
 
 def resolve_template_path(p: str) -> str:
-    """
-    支持：
-      - 绝对路径
-      - 相对 game root
-      - 相对 game_root/templates/（推荐：只写文件名）
-    """
     if not p:
         return ""
     p = str(p).strip()
@@ -392,8 +370,6 @@ def resolve_template_path(p: str) -> str:
         return cand
     return ""
 
-# ---------- core actions ----------
-
 def click_template_in_window(
     title_kw: str,
     tmpl_path: str,
@@ -402,10 +378,6 @@ def click_template_in_window(
     retry_sleep: float,
     log: Callable[[str], None],
 ) -> bool:
-    """
-    截取窗口图像 -> match template -> 点击中心（mouse_left）
-    增强：优先在上次命中附近 ROI 搜索，失败再回退全局搜索。
-    """
     path = resolve_template_path(tmpl_path)
     if not path:
         log(f"  [TPL] missing template: {tmpl_path}")
@@ -416,7 +388,7 @@ def click_template_in_window(
         log(f"  [TPL] cannot read template: {path}")
         return False
 
-    R = 160  # ROI radius
+    R = 160
 
     for r in range(retries):
         rect = find_window_rect(title_kw)
@@ -424,7 +396,6 @@ def click_template_in_window(
 
         hit = None
 
-        # 1) local ROI
         last = _LAST_HIT.get(path)
         if last is not None:
             lx, ly = last
@@ -441,7 +412,6 @@ def click_template_in_window(
                 cy += y0
                 hit = (cx, cy, score)
 
-        # 2) fallback global
         if hit is None:
             hit = match_template_center(frame, tmpl, threshold=thr)
 
@@ -464,9 +434,6 @@ def click_template_in_window(
 
 
 def do_advance_step(title_kw: str, method: str, rx: float, ry: float, interval: float):
-    """
-    统一用 ui.clicker.advance（pydirectinput）推进
-    """
     rect = find_window_rect(title_kw)
     advance(rect, method, _clamp01(rx), _clamp01(ry), interval=interval)
 
@@ -478,7 +445,7 @@ def detect_end_by_template(title_kw: str, end_tmpl_bgr, thr: float) -> bool:
 
 
 # ============================================================
-# Refactor helpers (A/B/C/D 拆分，但不改变外部使用方式)
+# Refactor helpers
 # ============================================================
 
 def _build_logger(log: Optional[Callable[[str], None]]) -> Callable[[str], None]:
@@ -599,11 +566,6 @@ def _check_end_conditions(
     hits_state: Dict[str, int],
     _log: Callable[[str], None],
 ) -> Tuple[bool, Dict[str, float]]:
-    """
-    统一封装 D 阶段逻辑：end.template 优先 + diff fallback
-    hits_state: {"end_hits": int, "diff_hits": int}
-    返回： (should_stop, debug_info)
-    """
     dbg = {"diff": 0.0, "end_hit": 0.0}
 
     if not can_end:
@@ -611,7 +573,6 @@ def _check_end_conditions(
         hits_state["diff_hits"] = 0
         return False, dbg
 
-    # 1) end.template
     if end_tmpl_bgr is not None and detect_end_by_template(title_kw, end_tmpl_bgr, thr=end_thr):
         hits_state["end_hits"] += 1
         if hits_state["end_hits"] >= end_hits_need:
@@ -620,7 +581,6 @@ def _check_end_conditions(
     else:
         hits_state["end_hits"] = 0
 
-    # 2) diff fallback
     rect = find_window_rect(title_kw)
     cur = grab_window_bgr(rect)
     diff = mean_abs_diff(ref_before_enter, cur)
@@ -658,13 +618,59 @@ def play_mode_default(
     end_hits_need: int,
     return_diff_thr: float,
     return_hits_need: int,
+    act_thr: float,               # <--- NEW: 传入动作匹配阈值
+    play_cfg_seq: Dict[str, Any] = None,
 ):
-    """
-    这是你现在的 C+D 逻辑“原样搬运”，只是独立成函数。
-    """
+    # 1. --- 坐标覆盖逻辑 ---
+    current_rx, current_ry = adv_rx, adv_ry
+
+    # 2. --- 初始化分支队列 ---
+    # 结构: [{ 'template': 'x.png', 'delay': 1.0, ... }]
+    raw_branches = []
+    if play_cfg_seq:
+        raw_branches = play_cfg_seq.get("branches", []) or []
+        target = play_cfg_seq.get("target")
+        if target and isinstance(target, (list, tuple)) and len(target) >= 2:
+            try:
+                tx = float(target[0])
+                ty = float(target[1])
+                if 0.0 <= tx <= 1.0 and 0.0 <= ty <= 1.0:
+                    current_rx = tx
+                    current_ry = ty
+                    _log(f"  [C] Overriding advance target: ({current_rx:.4f}, {current_ry:.4f})")
+            except (ValueError, TypeError):
+                pass
+
+    # 预加载分支信息 (Template Path resolution)
+    pending_branches = []
+    for b in raw_branches:
+        if not isinstance(b, dict): continue
+        tname = str(b.get("template", "")).strip()
+        if not tname: continue
+        
+        # 尝试解析路径，确保文件存在
+        tpath = resolve_template_path(tname)
+        if not tpath or not os.path.exists(tpath):
+            _log(f"  [WARN] Branch template not found: {tname} (will skip)")
+            continue
+            
+        # 预读取图片 (内存换速度)
+        tbgr = cv2.imread(tpath, cv2.IMREAD_COLOR)
+        if tbgr is None:
+            _log(f"  [WARN] Branch template invalid: {tname}")
+            continue
+
+        pending_branches.append({
+            "name": tname,
+            "bgr": tbgr,
+            "delay": float(b.get("delay", 1.0))
+        })
+    
+    if pending_branches:
+        _log(f"  [C] Branching enabled. {len(pending_branches)} branches pending.")
+
     _log("  [C] play loop ...")
     t0 = time.time()
-
     hits_state = {"diff_hits": 0, "end_hits": 0}
 
     for k in range(max_steps):
@@ -675,9 +681,25 @@ def play_mode_default(
         elapsed = time.time() - t0
         can_end = (elapsed >= min_play_sec)
 
-        do_check = (k % check_every_steps == 0) if check_every_steps > 0 else True
+        # -------------------------------------------------
+        # 1. 抓取当前帧 (Unified Grab)
+        # -------------------------------------------------
+        rect = find_window_rect(title_kw)
+        frame = grab_window_bgr(rect)
+        if frame is None:
+            time.sleep(0.5)
+            continue
 
+        # -------------------------------------------------
+        # 2. 结束条件检测 (End Check)
+        # -------------------------------------------------
+        do_check = (k % check_every_steps == 0) if check_every_steps > 0 else True
         if do_check:
+            # 这里的 _check_end_conditions 我们稍微修改一下或者直接用
+            # 为了不改动太多 helper，我们这里手动做一下检测，复用 grab 到的 frame
+            # (注：原 helper 内部会自己 grab，这里为了性能理应重构，但为了稳健先调用现有的)
+            # 鉴于 End detection 频率不高，让它自己 grab 一次也无妨。
+            
             should_stop, dbg = _check_end_conditions(
                 title_kw=title_kw,
                 ref_before_enter=ref_before_enter,
@@ -692,16 +714,77 @@ def play_mode_default(
             )
             if should_stop:
                 break
+        
+        # -------------------------------------------------
+        # 3. 分支检测 (Branching Check)
+        # -------------------------------------------------
+        matched_branch = None
+        matched_idx = -1
+        match_res = None # (cx, cy, score)
 
-        interval = click_interval
-        if jitter_sec > 0:
-            interval = max(0.01, interval + (np.random.rand() * 2 - 1) * jitter_sec)
+        if pending_branches:
+            # --- 策略 A: 优先检测队首 (Head Check) ---
+            head = pending_branches[0]
+            res = match_template_center(frame, head["bgr"], threshold=act_thr)
+            if res:
+                matched_branch = head
+                matched_idx = 0
+                match_res = res
+            
+            # --- 策略 B: 队首没中，检测剩余 (Deep Scan) ---
+            elif len(pending_branches) > 1:
+                # 遍历剩下的
+                for i, br in enumerate(pending_branches[1:], start=1):
+                    res = match_template_center(frame, br["bgr"], threshold=act_thr)
+                    if res:
+                        matched_branch = br
+                        matched_idx = i
+                        match_res = res
+                        break
+        
+        # -------------------------------------------------
+        # 4. 执行决策
+        # -------------------------------------------------
+        if matched_branch and match_res:
+            # === Case 1: 命中分支 ===
+            cx, cy, score = match_res
+            tname = matched_branch["name"]
+            
+            # 计算相对坐标 (Relative)
+            rw = max(1, rect.width)
+            rh = max(1, rect.height)
+            click_rx = _clamp01(cx / rw)
+            click_ry = _clamp01(cy / rh)
 
-        # 你未来如果实现 audio pacing，可以在这里做分支
-        if pacing == "audio":
-            interval = click_interval  # 占位：先按 system
+            _log(f"  [BRANCH] Matched #{matched_idx} '{tname}' (score={score:.2f}) -> Click ({click_rx:.3f}, {click_ry:.3f})")
+            
+            # 点击分支
+            advance(rect, "mouse_left", click_rx, click_ry, interval=0.1)
+            
+            # 消费队列 (移除当前及之前的所有项)
+            removed_count = matched_idx + 1
+            del pending_branches[:removed_count]
+            _log(f"           Queue updated: {removed_count} removed, {len(pending_branches)} remaining.")
+            
+            # 等待 (Branch Delay)
+            dly = matched_branch["delay"]
+            if dly > 0:
+                time.sleep(dly)
+                
+            # 跳过常规推进，直接下一轮
+            continue
 
-        do_advance_step(title_kw, method, adv_rx, adv_ry, interval=interval)
+        else:
+            # === Case 2: 常规推进 ===
+            interval = click_interval
+            if jitter_sec > 0:
+                interval = max(0.01, interval + (np.random.rand() * 2 - 1) * jitter_sec)
+
+            if pacing == "audio":
+                # TODO: Implement Audio Wait
+                interval = click_interval 
+
+            advance(rect, method, _clamp01(current_rx), _clamp01(current_ry), interval=interval)
 
 def play_dispatch(
     _log: Callable[[str], None],
@@ -710,7 +793,7 @@ def play_dispatch(
     play_cfg_seq: Dict[str, Any],
     adv_rx: float,
     adv_ry: float,
-    max_steps: int,
+    max_steps: int,  # 👈 ✅ 修复：确保这里接收 max_steps
     click_interval: float,
     jitter_sec: float,
     min_play_sec: float,
@@ -721,10 +804,8 @@ def play_dispatch(
     end_hits_need: int,
     return_diff_thr: float,
     return_hits_need: int,
+    act_thr: float,
 ):
-    """
-    C 阶段分发器：以后加模式，只动这里 + 新增 play_mode_xxx()
-    """
     method = str(play_cfg_seq.get("advance_method", "mouse_left")).strip()
     pacing = str(play_cfg_seq.get("pacing", "system")).strip()
     mode   = str(play_cfg_seq.get("mode", "default")).strip()
@@ -738,7 +819,7 @@ def play_dispatch(
             pacing=pacing,
             adv_rx=adv_rx,
             adv_ry=adv_ry,
-            max_steps=max_steps,
+            max_steps=max_steps,  # 👈 ✅ 传递 max_steps
             click_interval=click_interval,
             jitter_sec=jitter_sec,
             min_play_sec=min_play_sec,
@@ -749,11 +830,9 @@ def play_dispatch(
             end_hits_need=end_hits_need,
             return_diff_thr=return_diff_thr,
             return_hits_need=return_hits_need,
+            act_thr=act_thr,
+            play_cfg_seq=play_cfg_seq,
         )
-
-    # 未来示例：
-    # if mode == "smart":
-    #     return play_mode_smart(...)
 
     _log(f"  [C] unknown play.mode={mode}, fallback to default")
     return play_mode_default(
@@ -764,7 +843,7 @@ def play_dispatch(
         pacing=pacing,
         adv_rx=adv_rx,
         adv_ry=adv_ry,
-        max_steps=max_steps,
+        max_steps=max_steps,  # 👈 ✅ 传递 max_steps
         click_interval=click_interval,
         jitter_sec=jitter_sec,
         min_play_sec=min_play_sec,
@@ -775,6 +854,8 @@ def play_dispatch(
         end_hits_need=end_hits_need,
         return_diff_thr=return_diff_thr,
         return_hits_need=return_hits_need,
+        act_thr=act_thr,
+        play_cfg_seq=play_cfg_seq,
     )
 
 
@@ -791,6 +872,10 @@ def run_all_sequences(
     _log = _build_logger(log)
     stop_event = stop_event or Event()
 
+    # ✅ 启动 F9 监听线程
+    hotkey_thread = Thread(target=_watch_global_hotkey, args=(stop_event, _log), daemon=True)
+    hotkey_thread.start()
+
     cfg = load_config()
     prog = load_progress()
     tasks_state = prog.setdefault("tasks", {})
@@ -805,7 +890,6 @@ def run_all_sequences(
         return tasks_state.get(f"{sid:03d}", {})
 
     def set_state(sid: int, **kwargs):
-        # ✅ 保留你原来的行为：写入 progress.json
         k = f"{sid:03d}"
         st = tasks_state.get(k, {})
         st.update(kwargs)
@@ -821,7 +905,7 @@ def run_all_sequences(
         try:
             _log(f"[UI] Activating game window: {title_kw}")
             activate_window(title_kw)
-            time.sleep(0.5) # 给窗口弹出的动画一点时间
+            time.sleep(0.5)
         except Exception as e:
             _log(f"[WARN] Failed to activate game window: {e}")
     else:
@@ -834,16 +918,13 @@ def run_all_sequences(
     play_cfg   = cfg.get("play", {}) or {}
     audio_cfg  = cfg.get("audio", {}) or {}
 
-    # ===== Step delays between phases (from ui) =====
     STEP_DELAY = float(ui_cfg.get("step_delay_sec", 0.0))
     ENTER_AFTER_WAIT = float(ui_cfg.get("step_delay_entry_after_click", 0.0))
     AFTER_PREPLAY_WAIT = float(ui_cfg.get("step_delay_after_preplay", 0.0))
 
-    # ===== 推进点（仍从 config 读取，sequence 不配置）=====
     adv_rx = float(ui_cfg.get("advance_click_rel_x", 0.50))
     adv_ry = float(ui_cfg.get("advance_click_rel_y", 0.90))
 
-    # ===== A/B：模板匹配阈值与重试参数（来自 vision）=====
     ENTER_THR = float(vision_cfg.get("enter_template_thr", 0.80))
     ACT_THR   = float(vision_cfg.get("action_template_thr", 0.80))
 
@@ -853,13 +934,11 @@ def run_all_sequences(
     ENTER_RETRY_SLEEP = RETRY_SLEEP_SEC
     ACT_RETRY_SLEEP   = RETRY_SLEEP_SEC
 
-    # ===== A：进入后画面变化验证（来自 ui）=====
     SCENE_CHANGE_DIFF_THR   = float(ui_cfg.get("enter_scene_change_diff_thr", 10.0))
     SCENE_CHANGE_HITS       = int(ui_cfg.get("enter_scene_change_hits", 3))
     SCENE_CHANGE_TIMEOUT    = float(ui_cfg.get("enter_scene_change_timeout_sec", 2.0))
     ENTER_DOUBLE_CLICK      = bool(ui_cfg.get("enter_double_click", True))
 
-    # ===== D：结束检测（来自 end_detection）=====
     END_THR       = float(end_cfg.get("end_template_thr", 0.86))
     END_HITS_NEED = int(end_cfg.get("end_hits_need", 3))
 
@@ -871,7 +950,6 @@ def run_all_sequences(
     if CHECK_EVERY_STEPS < 1:
         CHECK_EVERY_STEPS = 1
 
-    # ===== C：播放循环节奏（来自 play / ui）=====
     MAX_STEPS = int(play_cfg.get("max_steps", 2000))
     CLICK_INTERVAL = float(play_cfg.get("pacing_system_sec", ui_cfg.get("click_interval_sec", 0.35)))
 
@@ -885,13 +963,23 @@ def run_all_sequences(
     if bool(ui_cfg.get("disable_failsafe", False)):
         pyautogui.FAILSAFE = False
 
-    rec = OBSRecorder(
-        host=obs_cfg.get("host", "127.0.0.1"),
-        port=int(obs_cfg.get("port", 4455)),
-        password=os.environ.get("OBS_PASSWORD", obs_cfg.get("password", "")),
-        output_raw_dir=obs_cfg.get("output_raw_dir", ""),
-        output_final_dir=obs_cfg.get("output_final_dir", ""),
-    )
+    try:
+        rec = OBSRecorder(
+            host=obs_cfg.get("host", "127.0.0.1"),
+            port=int(obs_cfg.get("port", 4455)),
+            password=os.environ.get("OBS_PASSWORD", obs_cfg.get("password", "")),
+            output_raw_dir=obs_cfg.get("output_raw_dir", ""),
+            output_final_dir=obs_cfg.get("output_final_dir", ""),
+        )
+        _log("[OK] OBS Connected.")
+    except Exception as e:
+        _log(f"\n[FATAL] 无法连接到 OBS! (Error: {e})")
+        _log("请检查：OBS 是否打开？OBS WebSocket 是否开启？端口密码是否匹配？")
+        try:
+            activate_window("ui_electron")
+        except:
+            pass
+        return
 
     sequences = list_sequences()
     if not sequences:
@@ -937,7 +1025,6 @@ def run_all_sequences(
             try:
                 _log(f"  entry.mode={entry.get('mode','gallery')} | preplay.actions={len(preplay)} | play={play_seq.get('advance_method')}/{play_seq.get('pacing')} mode={play_seq.get('mode','default')}")
 
-                # --- capture reference before entering (used by D fallback) ---
                 rect = find_window_rect(title_kw)
                 ref_before_enter = grab_window_bgr(rect)
 
@@ -991,7 +1078,7 @@ def run_all_sequences(
                         play_cfg_seq=play_seq,
                         adv_rx=adv_rx,
                         adv_ry=adv_ry,
-                        max_steps=MAX_STEPS,
+                        max_steps=MAX_STEPS,  # ✅ 传递 max_steps
                         click_interval=CLICK_INTERVAL,
                         jitter_sec=JITTER_SEC,
                         min_play_sec=MIN_PLAY_SEC,
@@ -1002,6 +1089,7 @@ def run_all_sequences(
                         end_hits_need=END_HITS_NEED,
                         return_diff_thr=RETURN_DIFF_THR,
                         return_hits_need=RETURN_HITS_NEED,
+                        act_thr=ACT_THR,
                     )
                 finally:
                     _log("  [REC] stop OBS recording ...")
@@ -1020,23 +1108,23 @@ def run_all_sequences(
             except Exception as e:
                 _log(f"[FAIL] {sid:03d} {name}: {e}")
                 set_state(sid, status="failed", name=name, basename=basename, error=str(e))
+                
+                # ✅✅✅ 致命错误熔断：文件存在错误直接退出，不重试
+                if "目标文件已存在" in str(e) or isinstance(e, FileExistsError):
+                    _log("\n[FATAL] Output file collision detected! Stopping runner completely to avoid infinite retries.")
+                    stop_event.set()
+                    break  # Break main loop
+                
                 if bool(ui_cfg.get("stop_on_fail", False)):
                     raise
                 else:
                     continue
     finally:
-        # ------------------------------------------------------------
-        # ✅ 修改点 3: 脚本结束（无论成功、失败、停止），激活 UI 窗口
-        # ------------------------------------------------------------
         _log("\n[UI] Restoring GalRec Manager window...")
         try:
-            # ⚠️ 关键：这里填你 Electron 程序的标题关键字
-            # 比如 "GalRec" 或者 "Project Manager"
-            # 你可以在任务栏把鼠标悬停在你的软件上，看看显示的字是什么
             ui_title = "ui_electron" 
             activate_window(ui_title)
         except Exception as e:
-            # 找不到窗口不应该让程序崩溃，只打印警告
             print(f"Warning: Could not restore UI window: {e}")
 
         if prog.get("run_only"):

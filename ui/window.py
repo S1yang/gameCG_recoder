@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import time
 import ctypes
+import sys
+
 
 import win32con
 import win32process
@@ -116,3 +118,67 @@ def activate_window(title_keyword: str) -> int:
     win32gui.SetForegroundWindow(hwnd)
     time.sleep(0.15)
     return hwnd
+
+
+def activate_window_force(title_kw: str, retry: int = 3, sleep_ms: int = 80):
+    """
+    更稳的激活：AttachThreadInput + ShowWindow + SetForegroundWindow
+    仍可能被系统策略拦，但成功率远高于裸 SetForegroundWindow。
+    """
+    if not sys.platform.startswith("win"):
+        # 其他平台走你原来的逻辑
+        return activate_window(title_kw)
+
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+
+    # 你已有的 find_window_rect 里肯定能拿到 hwnd；
+    # 这里假设你已有一个函数能按标题关键字找 hwnd。
+    hwnd = _find_hwnd(title_kw)  
+    if not hwnd:
+        raise RuntimeError(f"window not found for keyword: {title_kw}")
+
+    SW_RESTORE = 9
+
+    def _try_once():
+        # restore / show
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.BringWindowToTop(hwnd)
+
+        fg = user32.GetForegroundWindow()
+        fg_tid = user32.GetWindowThreadProcessId(fg, None)
+        cur_tid = kernel32.GetCurrentThreadId()
+        target_tid = user32.GetWindowThreadProcessId(hwnd, None)
+
+        # attach input threads
+        user32.AttachThreadInput(cur_tid, fg_tid, True)
+        user32.AttachThreadInput(cur_tid, target_tid, True)
+
+        user32.SetForegroundWindow(hwnd)
+        user32.SetActiveWindow(hwnd)
+        user32.SetFocus(hwnd)
+
+        # detach
+        user32.AttachThreadInput(cur_tid, fg_tid, False)
+        user32.AttachThreadInput(cur_tid, target_tid, False)
+
+        # verify
+        return user32.GetForegroundWindow() == hwnd
+
+    ok = False
+    last_err = None
+    for _ in range(max(1, retry)):
+        try:
+            ok = _try_once()
+            if ok:
+                return True
+            time.sleep(sleep_ms / 1000.0)
+        except Exception as e:
+            last_err = e
+            time.sleep(sleep_ms / 1000.0)
+
+    if not ok:
+        raise RuntimeError(f"SetForegroundWindow denied (force failed). last_err={last_err}")
