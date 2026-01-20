@@ -19,6 +19,9 @@ from obs.recorder import OBSRecorder
 from state import load_progress, set_task_state, save_progress, set_game_root, get_game_root
 from game_registry import GameRegistry
 
+# 🌟 Import Audio Agent
+from api.audio_agent import AudioAgent
+
 _LAST_HIT = {}
 
 try:
@@ -554,45 +557,77 @@ def phase_B_preplay(
 
         time.sleep(max(0.0, delay))
 
+# 🟢 封装的判断器：快速消抖验证
+def _quick_verify(
+    _log: Callable[[str], None],
+    desc: str,
+    checker: Callable[[], bool],
+    hits_needed: int,
+    interval: float = 0.15
+) -> bool:
+    """
+    当发现一次疑似满足条件后，进入快速采样确认阶段。
+    如果连续 hits_needed 次满足，则返回 True。
+    只要中间有一次不满足，立即返回 False (视为抖动)。
+    """
+    if hits_needed <= 1:
+        return True
+        
+    # 已经命中 1 次，还需要 hits_needed - 1 次
+    # 使用 0.15s 左右的高频采样
+    for i in range(hits_needed - 1):
+        time.sleep(interval)
+        if not checker():
+            # 只要失败一次，就视为误判，立刻返回 False
+            return False
+    
+    return True
+
 def _check_end_conditions(
     title_kw: str,
     ref_before_enter,
     end_tmpl_bgr,
-    end_thr: float,
+    end_thr: float,  # 🟢 确保参数在这里
     end_hits_need: int,
     return_diff_thr: float,
     return_hits_need: int,
     can_end: bool,
-    hits_state: Dict[str, int],
     _log: Callable[[str], None],
 ) -> Tuple[bool, Dict[str, float]]:
-    dbg = {"diff": 0.0, "end_hit": 0.0}
+    dbg = {"diff": 0.0}
 
     if not can_end:
-        hits_state["end_hits"] = 0
-        hits_state["diff_hits"] = 0
         return False, dbg
 
-    if end_tmpl_bgr is not None and detect_end_by_template(title_kw, end_tmpl_bgr, thr=end_thr):
-        hits_state["end_hits"] += 1
-        if hits_state["end_hits"] >= end_hits_need:
-            _log(f"  [D] end.template detected -> stop (hits={hits_state['end_hits']})")
-            return True, dbg
-    else:
-        hits_state["end_hits"] = 0
+    # 1. 优先检测 End Template
+    if end_tmpl_bgr is not None:
+        if detect_end_by_template(title_kw, end_tmpl_bgr, thr=end_thr):
+            # 触发：进入快速判定器
+            def check_end_stable():
+                return detect_end_by_template(title_kw, end_tmpl_bgr, thr=end_thr)
+            
+            if _quick_verify(_log, "end.template", check_end_stable, end_hits_need):
+                _log(f"  [D] end.template confirmed (hits={end_hits_need}) -> stop")
+                return True, dbg
 
+    # 2. 其次检测画面回归 (Diff)
     rect = find_window_rect(title_kw)
     cur = grab_window_bgr(rect)
     diff = mean_abs_diff(ref_before_enter, cur)
     dbg["diff"] = diff
 
     if diff < return_diff_thr:
-        hits_state["diff_hits"] += 1
-        if hits_state["diff_hits"] >= return_hits_need:
-            _log(f"  [D] return(diff) detected -> stop (diff={diff:.2f}, hits={hits_state['diff_hits']})")
+        # 触发：进入快速判定器
+        def check_diff_stable():
+            # 重新抓取
+            r = find_window_rect(title_kw)
+            c = grab_window_bgr(r)
+            d = mean_abs_diff(ref_before_enter, c)
+            return d < return_diff_thr
+
+        if _quick_verify(_log, "return(diff)", check_diff_stable, return_hits_need):
+            _log(f"  [D] return(diff) confirmed (diff={diff:.2f} < {return_diff_thr}, hits={return_hits_need}) -> stop")
             return True, dbg
-    else:
-        hits_state["diff_hits"] = 0
 
     return False, dbg
 
@@ -618,14 +653,14 @@ def play_mode_default(
     end_hits_need: int,
     return_diff_thr: float,
     return_hits_need: int,
-    act_thr: float,               # <--- NEW: 传入动作匹配阈值
+    act_thr: float,
     play_cfg_seq: Dict[str, Any] = None,
+    audio_agent: Optional[AudioAgent] = None,
 ):
     # 1. --- 坐标覆盖逻辑 ---
     current_rx, current_ry = adv_rx, adv_ry
 
     # 2. --- 初始化分支队列 ---
-    # 结构: [{ 'template': 'x.png', 'delay': 1.0, ... }]
     raw_branches = []
     if play_cfg_seq:
         raw_branches = play_cfg_seq.get("branches", []) or []
@@ -641,20 +676,18 @@ def play_mode_default(
             except (ValueError, TypeError):
                 pass
 
-    # 预加载分支信息 (Template Path resolution)
+    # 预加载分支信息
     pending_branches = []
     for b in raw_branches:
         if not isinstance(b, dict): continue
         tname = str(b.get("template", "")).strip()
         if not tname: continue
         
-        # 尝试解析路径，确保文件存在
         tpath = resolve_template_path(tname)
         if not tpath or not os.path.exists(tpath):
             _log(f"  [WARN] Branch template not found: {tname} (will skip)")
             continue
             
-        # 预读取图片 (内存换速度)
         tbgr = cv2.imread(tpath, cv2.IMREAD_COLOR)
         if tbgr is None:
             _log(f"  [WARN] Branch template invalid: {tname}")
@@ -671,8 +704,7 @@ def play_mode_default(
 
     _log("  [C] play loop ...")
     t0 = time.time()
-    hits_state = {"diff_hits": 0, "end_hits": 0}
-
+    
     for k in range(max_steps):
         if stop_event.is_set():
             _log(f"[STOP] stop requested during play (k={k}).")
@@ -695,21 +727,15 @@ def play_mode_default(
         # -------------------------------------------------
         do_check = (k % check_every_steps == 0) if check_every_steps > 0 else True
         if do_check:
-            # 这里的 _check_end_conditions 我们稍微修改一下或者直接用
-            # 为了不改动太多 helper，我们这里手动做一下检测，复用 grab 到的 frame
-            # (注：原 helper 内部会自己 grab，这里为了性能理应重构，但为了稳健先调用现有的)
-            # 鉴于 End detection 频率不高，让它自己 grab 一次也无妨。
-            
             should_stop, dbg = _check_end_conditions(
                 title_kw=title_kw,
                 ref_before_enter=ref_before_enter,
                 end_tmpl_bgr=end_tmpl_bgr,
-                end_thr=end_thr,
+                end_thr=end_thr,  # 🟢 传递正确参数
                 end_hits_need=end_hits_need,
                 return_diff_thr=return_diff_thr,
                 return_hits_need=return_hits_need,
                 can_end=can_end,
-                hits_state=hits_state,
                 _log=_log,
             )
             if should_stop:
@@ -780,11 +806,34 @@ def play_mode_default(
             if jitter_sec > 0:
                 interval = max(0.01, interval + (np.random.rand() * 2 - 1) * jitter_sec)
 
-            if pacing == "audio":
-                # TODO: Implement Audio Wait
-                interval = click_interval 
-
-            advance(rect, method, _clamp01(current_rx), _clamp01(current_ry), interval=interval)
+            # Audio Pacing Implementation
+            if pacing == "audio" and audio_agent:
+                # 1. 快速点击
+                advance(rect, method, _clamp01(current_rx), _clamp01(current_ry), interval=0.1)
+                
+                # 2. 从配置中读取参数
+                cfg_threshold = 0.45
+                cfg_silence = 2.0
+                cfg_max_wait = 15.0
+                cfg_start_timeout = 2.0
+                
+                if play_cfg_seq:
+                    cfg_threshold = float(play_cfg_seq.get("audio_threshold", 0.45))
+                    cfg_silence = float(play_cfg_seq.get("audio_silence_sec", 2.0))
+                    cfg_max_wait = float(play_cfg_seq.get("audio_max_wait_sec", 15.0))
+                    cfg_start_timeout = float(play_cfg_seq.get("audio_start_timeout_sec", 2.0))
+                
+                # 3. 调用 Agent
+                audio_agent.wait_for_speech_complete(
+                    start_timeout=cfg_start_timeout,
+                    silence_duration=cfg_silence,
+                    max_total_wait=cfg_max_wait,
+                    speech_threshold=cfg_threshold,
+                    log_fn=_log
+                )
+            else:
+                # 传统的 System Pacing (Click + Sleep)
+                advance(rect, method, _clamp01(current_rx), _clamp01(current_ry), interval=interval)
 
 def play_dispatch(
     _log: Callable[[str], None],
@@ -793,18 +842,19 @@ def play_dispatch(
     play_cfg_seq: Dict[str, Any],
     adv_rx: float,
     adv_ry: float,
-    max_steps: int,  # 👈 ✅ 修复：确保这里接收 max_steps
+    max_steps: int,
     click_interval: float,
     jitter_sec: float,
     min_play_sec: float,
     check_every_steps: int,
     ref_before_enter,
     end_tmpl_bgr,
-    end_thr: float,
+    end_thr: float, # 🟢 确保参数在这里
     end_hits_need: int,
     return_diff_thr: float,
     return_hits_need: int,
     act_thr: float,
+    audio_agent: Optional[AudioAgent] = None,
 ):
     method = str(play_cfg_seq.get("advance_method", "mouse_left")).strip()
     pacing = str(play_cfg_seq.get("pacing", "system")).strip()
@@ -819,7 +869,7 @@ def play_dispatch(
             pacing=pacing,
             adv_rx=adv_rx,
             adv_ry=adv_ry,
-            max_steps=max_steps,  # 👈 ✅ 传递 max_steps
+            max_steps=max_steps,
             click_interval=click_interval,
             jitter_sec=jitter_sec,
             min_play_sec=min_play_sec,
@@ -832,6 +882,7 @@ def play_dispatch(
             return_hits_need=return_hits_need,
             act_thr=act_thr,
             play_cfg_seq=play_cfg_seq,
+            audio_agent=audio_agent,
         )
 
     _log(f"  [C] unknown play.mode={mode}, fallback to default")
@@ -843,7 +894,7 @@ def play_dispatch(
         pacing=pacing,
         adv_rx=adv_rx,
         adv_ry=adv_ry,
-        max_steps=max_steps,  # 👈 ✅ 传递 max_steps
+        max_steps=max_steps,
         click_interval=click_interval,
         jitter_sec=jitter_sec,
         min_play_sec=min_play_sec,
@@ -856,6 +907,7 @@ def play_dispatch(
         return_hits_need=return_hits_need,
         act_thr=act_thr,
         play_cfg_seq=play_cfg_seq,
+        audio_agent=audio_agent,
     )
 
 
@@ -911,12 +963,12 @@ def run_all_sequences(
     else:
         raise RuntimeError("config.yaml 缺少 game_window_title")
 
-    obs_cfg    = cfg.get("obs", {}) or {}
-    ui_cfg     = cfg.get("ui", {}) or {}
-    vision_cfg = cfg.get("vision", {}) or {}
-    end_cfg    = cfg.get("end_detection", {}) or {}
-    play_cfg   = cfg.get("play", {}) or {}
-    audio_cfg  = cfg.get("audio", {}) or {}
+    obs_cfg     = cfg.get("obs", {}) or {}
+    ui_cfg      = cfg.get("ui", {}) or {}
+    vision_cfg  = cfg.get("vision", {}) or {}
+    end_cfg     = cfg.get("end_detection", {}) or {}
+    play_cfg    = cfg.get("play", {}) or {}
+    audio_cfg   = cfg.get("audio", {}) or {}
 
     STEP_DELAY = float(ui_cfg.get("step_delay_sec", 0.0))
     ENTER_AFTER_WAIT = float(ui_cfg.get("step_delay_entry_after_click", 0.0))
@@ -963,6 +1015,17 @@ def run_all_sequences(
     if bool(ui_cfg.get("disable_failsafe", False)):
         pyautogui.FAILSAFE = False
 
+    # 🌟 NEW: Initialize Audio Agent (Brain)
+    audio_agent = None
+    if AUDIO_ENABLED:
+        try:
+            audio_agent = AudioAgent()
+            audio_agent.start()
+            _log("[OK] Audio Agent started (Silero VAD).")
+        except Exception as e:
+            _log(f"[WARN] Audio Agent failed to start: {e}")
+            AUDIO_ENABLED = False # Fallback to system pacing if agent dies
+
     try:
         rec = OBSRecorder(
             host=obs_cfg.get("host", "127.0.0.1"),
@@ -979,10 +1042,12 @@ def run_all_sequences(
             activate_window("ui_electron")
         except:
             pass
+        if audio_agent: audio_agent.stop() # Clean up
         return
 
     sequences = list_sequences()
     if not sequences:
+        if audio_agent: audio_agent.stop()
         raise RuntimeError("sequences 目录为空。请先用 sequence_editor 保存至少一个任务。")
 
 
@@ -1078,7 +1143,7 @@ def run_all_sequences(
                         play_cfg_seq=play_seq,
                         adv_rx=adv_rx,
                         adv_ry=adv_ry,
-                        max_steps=MAX_STEPS,  # ✅ 传递 max_steps
+                        max_steps=MAX_STEPS,
                         click_interval=CLICK_INTERVAL,
                         jitter_sec=JITTER_SEC,
                         min_play_sec=MIN_PLAY_SEC,
@@ -1090,6 +1155,7 @@ def run_all_sequences(
                         return_diff_thr=RETURN_DIFF_THR,
                         return_hits_need=RETURN_HITS_NEED,
                         act_thr=ACT_THR,
+                        audio_agent=audio_agent,
                     )
                 finally:
                     _log("  [REC] stop OBS recording ...")
@@ -1120,6 +1186,10 @@ def run_all_sequences(
                 else:
                     continue
     finally:
+        # 🌟 NEW: Stop Audio Agent
+        if audio_agent:
+            audio_agent.stop()
+            
         _log("\n[UI] Restoring GalRec Manager window...")
         try:
             ui_title = "ui_electron" 
