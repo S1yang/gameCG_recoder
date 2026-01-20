@@ -17,6 +17,7 @@ from meta import router as meta_router
 from progress import router as progress_router
 from runner_api import router as runner_router
 from capture import router as capture_router
+from logs import router as logs_router
 
 # Ensure we can import modules from project root (game_registry.py, state.py, etc.)
 PROJECT_BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -40,6 +41,7 @@ def create_app() -> FastAPI:
     app.include_router(progress_router)
     app.include_router(runner_router)
     app.include_router(capture_router)
+    app.include_router(logs_router)
 
     # Dev-friendly CORS (Electron/localhost). Tighten later if needed.
     app.add_middleware(

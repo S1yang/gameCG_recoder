@@ -1,4 +1,4 @@
-// src/TaskEditor.tsx
+// src/components/tasks/TaskEditor.tsx
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -21,6 +21,7 @@ import {
   Trash2,
   Image as ImageIcon,
   Camera,
+  Copy,
 } from "lucide-react";
 
 import { PointPicker } from "@/components/common/PointPicker";
@@ -43,12 +44,15 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
-// 引入新拆分的组件
+// 引入拆分的组件
 import { CaptureModal } from "@/components/tasks/CaptureModal";
+import { SaveTemplateDialog } from "@/components/tasks/SaveTemplateDialog";
 
 type Task = any;
 
-// --- API Helpers ---
+// ============================================================================
+//  API & Helpers
+// ============================================================================
 
 async function apiGet(base: string, path: string) {
   const r = await fetch(`${base}${path}`);
@@ -83,7 +87,92 @@ function pad3(n: number) {
   return String(n).padStart(3, "0");
 }
 
-// --- Components ---
+// ============================================================================
+//  Sub Components (Defined outside)
+// ============================================================================
+
+/**
+ * 🟢 修复核心：智能数字输入框
+ * 解决 parseFloat 导致无法输入小数点(0. -> 0) 或无法清空的问题
+ */
+function SmartNumberInput({
+  value,
+  onValueChange,
+  ...props
+}: Omit<React.ComponentProps<typeof Input>, "value" | "onChange"> & {
+  value: number | undefined;
+  onValueChange: (val: number | undefined) => void;
+}) {
+  // 内部维护一个字符串状态，允许 "0." 或 "" 等中间状态存在
+  const [localVal, setLocalVal] = useState(value?.toString() ?? "");
+
+  useEffect(() => {
+    // 只有当父组件传入的值与当前解析出的数字不一致时，才强制同步
+    // 这样避免了 typing "0." -> parsed 0 -> parent 0 -> effect 0 -> setLocalVal "0" (丢失小数点)
+    const currentParsed = parseFloat(localVal);
+    const isEditingDecimal =
+      localVal.endsWith(".") || localVal === "-" || localVal === "";
+
+    // 如果父组件的值变了（比如加载了新模板），且不是因为我们刚才的输入导致的，就更新
+    if (value !== currentParsed && !isEditingDecimal) {
+      setLocalVal(value?.toString() ?? "");
+    } else if (value !== undefined && value !== currentParsed) {
+      // 处理外部重置（如 undo/reset）
+      setLocalVal(value.toString());
+    }
+  }, [value]);
+
+  return (
+    <Input
+      {...props}
+      value={localVal}
+      onChange={(e) => {
+        const raw = e.target.value;
+        setLocalVal(raw); // 立即更新 UI 显示，保证输入流畅
+
+        if (raw === "") {
+          onValueChange(undefined);
+        } else {
+          const num = parseFloat(raw);
+          if (!isNaN(num)) {
+            onValueChange(num);
+          }
+        }
+      }}
+    />
+  );
+}
+
+function TemplateSelect({
+  value,
+  onPick,
+  placeholder,
+  templates,
+}: {
+  value: string;
+  onPick: (v: string) => void;
+  placeholder?: string;
+  templates: string[];
+}) {
+  return (
+    <Select
+      value={value || ""}
+      onValueChange={(v) => onPick(v === "__empty__" ? "" : v)}
+    >
+      <SelectTrigger className="w-full">
+        <SelectValue placeholder={placeholder ?? "Select template..."} />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value="__empty__">(none)</SelectItem>
+        {templates.map((bn) => (
+          <SelectItem key={bn} value={bn}>
+            {bn}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
 
 function StepNavigator({
   step,
@@ -117,7 +206,6 @@ function StepNavigator({
               }
             `}
           >
-            {/* 图标圆圈 */}
             <div
               className={`flex items-center justify-center w-8 h-8 rounded-full transition-colors ${
                 active
@@ -127,8 +215,6 @@ function StepNavigator({
             >
               <Icon className="w-4 h-4" />
             </div>
-
-            {/* 文字区域：Label + Desc */}
             <div className="flex flex-col items-start text-left leading-tight">
               <span
                 className={`text-sm font-semibold ${
@@ -148,7 +234,6 @@ function StepNavigator({
   );
 }
 
-// 提取出来的 Sortable Item 组件
 function SortableActionItem({
   id,
   action,
@@ -204,7 +289,7 @@ function SortableActionItem({
       }`}
     >
       <div className="flex gap-3 items-center">
-        {/* 1. 左侧：缩略图/占位符 */}
+        {/* 左侧：缩略图 */}
         <div className="shrink-0 w-[100px] h-[70px] bg-muted/20 rounded border flex items-center justify-center overflow-hidden">
           {action?.template ? (
             <img
@@ -221,7 +306,7 @@ function SortableActionItem({
           )}
         </div>
 
-        {/* 2. 中间：表单区域 (flex-1 占据剩余空间) */}
+        {/* 中间：表单 */}
         <div className="flex-1 min-w-0 flex flex-col justify-center gap-2">
           <div className="flex gap-3 items-end">
             <div className="flex-1">
@@ -229,24 +314,11 @@ function SortableActionItem({
                 Template
               </div>
               <div className="flex gap-2">
-                <Select
-                  value={action?.template || ""}
-                  onValueChange={(v) =>
-                    onUpdate("template", v === "__empty__" ? "" : v)
-                  }
-                >
-                  <SelectTrigger className="h-8">
-                    <SelectValue placeholder="Select..." />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="__empty__">(none)</SelectItem>
-                    {templates.map((bn) => (
-                      <SelectItem key={bn} value={bn}>
-                        {bn}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <TemplateSelect
+                  templates={templates}
+                  value={action?.template}
+                  onPick={(v) => onUpdate("template", v)}
+                />
 
                 <Button
                   size="sm"
@@ -266,16 +338,14 @@ function SortableActionItem({
                 Delay
               </div>
               <div className="relative">
-                <Input
+                {/* 🟢 替换为 SmartNumberInput */}
+                <SmartNumberInput
                   type="number"
-                  step="0.1"
-                  min="0"
+                  step={0.1}
+                  min={0}
                   className="h-8 pr-6 font-mono text-right"
                   value={action?.delay ?? 0.5}
-                  onChange={(e) => {
-                    const val = parseFloat(e.target.value);
-                    onUpdate("delay", isNaN(val) ? 0 : val);
-                  }}
+                  onValueChange={(val) => onUpdate("delay", val ?? 0)}
                 />
                 <div className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-muted-foreground pointer-events-none">
                   s
@@ -297,7 +367,7 @@ function SortableActionItem({
           </div>
         </div>
 
-        {/* 3. 右侧：拖拽手柄 (移到最后) */}
+        {/* 右侧：拖拽手柄 */}
         <div
           {...attributes}
           {...listeners}
@@ -311,7 +381,9 @@ function SortableActionItem({
   );
 }
 
-// --- Main Editor ---
+// ============================================================================
+//  Main Component: TaskEditor
+// ============================================================================
 
 type Props = {
   apiBase: string;
@@ -335,20 +407,18 @@ export default function TaskEditor({
   const [templates, setTemplates] = useState<string[]>([]);
   const [raw, setRaw] = useState("");
 
-  // Capture State
   const [captureOpen, setCaptureOpen] = useState(false);
   const [captureTargetName, setCaptureTargetName] = useState("");
   const [captureCallback, setCaptureCallback] = useState<
     (name: string) => void
   >(() => {});
 
-  // DnD Sensors
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } })
   );
 
-  // Mouse pick State
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [saveTplOpen, setSaveTplOpen] = useState(false);
 
   useEffect(() => {
     if (!apiBase) return;
@@ -401,35 +471,6 @@ export default function TaskEditor({
     setCaptureOpen(true);
   };
 
-  // --- Helpers ---
-
-  const TemplateSelect = ({
-    value,
-    onPick,
-    placeholder,
-  }: {
-    value: string;
-    onPick: (v: string) => void;
-    placeholder?: string;
-  }) => (
-    <Select
-      value={value || ""}
-      onValueChange={(v) => onPick(v === "__empty__" ? "" : v)}
-    >
-      <SelectTrigger className="w-full">
-        <SelectValue placeholder={placeholder ?? "Select template..."} />
-      </SelectTrigger>
-      <SelectContent>
-        <SelectItem value="__empty__">(none)</SelectItem>
-        {templates.map((bn) => (
-          <SelectItem key={bn} value={bn}>
-            {bn}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
-  );
-
   const fileUrl = (name: string) => {
     const u = new URL(`${apiBase}/templates/file`);
     u.searchParams.set("name", name);
@@ -437,7 +478,6 @@ export default function TaskEditor({
     return u.toString();
   };
 
-  // Step 2 DnD Handler
   const handleDragEnd = (e: DragEndEvent) => {
     const { active, over } = e;
     if (!over || active.id === over.id) return;
@@ -452,7 +492,6 @@ export default function TaskEditor({
     });
   };
 
-  // Step 3 DnD Handler
   const handleDragEndStep3 = (e: DragEndEvent) => {
     const { active, over } = e;
     if (!over || active.id === over.id) return;
@@ -467,10 +506,7 @@ export default function TaskEditor({
     });
   };
 
-  // Helper to get branches safely
   const branches: any[] = t ? getByPath(t, ["play", "branches"], []) : [];
-
-  // --- Render (Form View 逻辑直接嵌入) ---
 
   if (!t && mode === "form") {
     return (
@@ -480,7 +516,6 @@ export default function TaskEditor({
     );
   }
 
-  // Extract data for form
   const name = t ? getByPath(t, ["name"], "") : "";
   const basename = t ? getByPath(t, ["record", "basename"], "") : "";
   const entryMode = t ? getByPath(t, ["entry", "mode"], "gallery") : "gallery";
@@ -495,7 +530,7 @@ export default function TaskEditor({
   return (
     <>
       <div className="space-y-4">
-        {/* Top Bar */}
+        {/* Header Toolbar */}
         <div className="flex items-center justify-between pb-2 border-b">
           <div className="flex items-center gap-3">
             <div className="text-lg font-bold tracking-tight">Task Editor</div>
@@ -507,6 +542,19 @@ export default function TaskEditor({
           </div>
 
           <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setSaveTplOpen(true)}
+              disabled={!t}
+              title="Save current config as a reusable template"
+            >
+              <Copy className="w-3.5 h-3.5 mr-1.5" />
+              Save as Template
+            </Button>
+
+            <div className="w-px h-4 bg-border mx-1" />
+
             <Button
               variant="outline"
               size="sm"
@@ -522,12 +570,12 @@ export default function TaskEditor({
           </div>
         </div>
 
-        {/* Content */}
+        {/* Content Area */}
         {mode === "form" ? (
           <div className="space-y-6">
             <StepNavigator step={step} setStep={setStep} />
 
-            {/* Meta Info Section */}
+            {/* General Info */}
             <div className="grid grid-cols-12 gap-4 p-4 bg-muted/20 rounded-lg border">
               <div className="col-span-6">
                 <div className="text-[10px] uppercase font-bold text-muted-foreground mb-1">
@@ -564,7 +612,7 @@ export default function TaskEditor({
               </div>
             </div>
 
-            {/* Step 1 */}
+            {/* Step 1: Entry */}
             {step === 1 && (
               <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
                 <div className="flex items-center justify-between">
@@ -597,6 +645,7 @@ export default function TaskEditor({
                       </div>
                       <div className="flex gap-2">
                         <TemplateSelect
+                          templates={templates}
                           value={entryTpl}
                           onPick={(v) =>
                             apply((d) => setByPath(d, ["entry", "template"], v))
@@ -631,7 +680,7 @@ export default function TaskEditor({
               </div>
             )}
 
-            {/* Step 2 */}
+            {/* Step 2: Preplay */}
             {step === 2 && (
               <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
                 <div className="flex items-center justify-between">
@@ -651,7 +700,6 @@ export default function TaskEditor({
                   </Button>
                 </div>
 
-                {/* DnD List */}
                 <DndContext
                   sensors={sensors}
                   collisionDetection={closestCenter}
@@ -677,7 +725,7 @@ export default function TaskEditor({
                           action={a}
                           taskIdStr={taskIdStr}
                           templates={templates}
-                          apiBase={apiBase} // 传入 API Base
+                          apiBase={apiBase}
                           onUpdate={(field, val) =>
                             apply((d) => {
                               const next = getByPath(
@@ -735,15 +783,13 @@ export default function TaskEditor({
               </div>
             )}
 
-            {/* Step 3 */}
-            {/* Step 3 */}
+            {/* Step 3: Play Loop */}
             {step === 3 && (
               <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
                 <div className="flex items-center justify-between">
-                  <div className="font-medium">Step 3 — Play (C)</div>
+                  <div className="font-medium">Play Loop Configuration</div>
                 </div>
 
-                {/* Grid Configuration: Method, Pacing, Target */}
                 <div className="grid grid-cols-12 gap-3">
                   <div className="col-span-4">
                     <div className="text-xs text-muted-foreground mb-1">
@@ -783,17 +829,135 @@ export default function TaskEditor({
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="system">system</SelectItem>
-                        <SelectItem value="audio" disabled>
-                          audio (todo)
-                        </SelectItem>
+                        <SelectItem value="audio">audio (Smart VAD)</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
 
-                  {/* 👇 Target Coordinates (仅 mouse_left 显示) */}
+                  {pacing === "audio" && (
+                    <div className="col-span-12 grid grid-cols-2 gap-3 bg-muted/30 p-2 rounded-md border border-dashed animate-in fade-in zoom-in-95 duration-200">
+                      {/* 🟢 使用 SmartNumberInput 替换所有 Audio 参数 */}
+                      <div>
+                        <div className="text-[10px] text-muted-foreground mb-1 font-medium">
+                          灵敏度阈值 (Threshold)
+                        </div>
+                        <SmartNumberInput
+                          type="number"
+                          step={0.05}
+                          min={0.1}
+                          max={0.95}
+                          className="h-7 text-xs font-mono bg-background"
+                          placeholder="0.45"
+                          value={getByPath(
+                            t,
+                            ["play", "audio_threshold"],
+                            undefined
+                          )}
+                          onValueChange={(v) => {
+                            apply((d) => {
+                              if (v === undefined)
+                                delete d.play.audio_threshold;
+                              else setByPath(d, ["play", "audio_threshold"], v);
+                            });
+                          }}
+                        />
+                        <div className="text-[9px] text-muted-foreground/60 mt-0.5">
+                          值越低越灵敏。有BGM建议: 0.45+, 无BGM: 0.3-
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="text-[10px] text-muted-foreground mb-1 font-medium">
+                          等待开口 (Start Timeout)
+                        </div>
+                        <SmartNumberInput
+                          type="number"
+                          step={0.5}
+                          className="h-7 text-xs font-mono bg-background"
+                          placeholder="2.0"
+                          value={getByPath(
+                            t,
+                            ["play", "audio_start_timeout_sec"],
+                            undefined
+                          )}
+                          onValueChange={(v) => {
+                            apply((d) => {
+                              if (v === undefined)
+                                delete d.play.audio_start_timeout_sec;
+                              else
+                                setByPath(
+                                  d,
+                                  ["play", "audio_start_timeout_sec"],
+                                  v
+                                );
+                            });
+                          }}
+                        />
+                        <div className="text-[9px] text-muted-foreground/60 mt-0.5">
+                          超过此时间未检测到语音则跳过 (秒)
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="text-[10px] text-muted-foreground mb-1 font-medium">
+                          静音判定 (Silence)
+                        </div>
+                        <SmartNumberInput
+                          type="number"
+                          step={0.1}
+                          className="h-7 text-xs font-mono bg-background"
+                          placeholder="2.0"
+                          value={getByPath(
+                            t,
+                            ["play", "audio_silence_sec"],
+                            undefined
+                          )}
+                          onValueChange={(v) => {
+                            apply((d) => {
+                              if (v === undefined)
+                                delete d.play.audio_silence_sec;
+                              else
+                                setByPath(d, ["play", "audio_silence_sec"], v);
+                            });
+                          }}
+                        />
+                        <div className="text-[9px] text-muted-foreground/60 mt-0.5">
+                          语音停止多久后视为结束 (秒)
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="text-[10px] text-muted-foreground mb-1 font-medium">
+                          超时兜底 (Max Wait)
+                        </div>
+                        <SmartNumberInput
+                          type="number"
+                          step={1.0}
+                          className="h-7 text-xs font-mono bg-background"
+                          placeholder="15.0"
+                          value={getByPath(
+                            t,
+                            ["play", "audio_max_wait_sec"],
+                            undefined
+                          )}
+                          onValueChange={(v) => {
+                            apply((d) => {
+                              if (v === undefined)
+                                delete d.play.audio_max_wait_sec;
+                              else
+                                setByPath(d, ["play", "audio_max_wait_sec"], v);
+                            });
+                          }}
+                        />
+                        <div className="text-[9px] text-muted-foreground/60 mt-0.5">
+                          最长等待时间，防止卡死 (秒)
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {advMethod === "mouse_left" && (
                     <div className="col-span-4 space-y-1">
-                      {/* Label Row with Pick Button */}
                       <div className="flex items-center justify-between">
                         <div className="text-xs text-muted-foreground">
                           Target (X, Y)
@@ -809,9 +973,11 @@ export default function TaskEditor({
                           Pick
                         </Button>
                       </div>
-
-                      {/* Inputs Row */}
                       <div className="flex gap-2">
+                        {/* Target X/Y 通常存储为字符串或浮点数，但为了保持灵活性，这里我们继续使用普通 Input 
+                            如果需要严格的数字校验，也可以换成 SmartNumberInput，但坐标有时可能是百分比字符串(虽然后端不一定支持)
+                            暂时保持原样，因为您之前的反馈主要集中在 audio 参数和 delay 参数上。
+                        */}
                         <Input
                           placeholder="Global X"
                           value={getByPath(t, ["play", "target", 0], "")}
@@ -823,15 +989,11 @@ export default function TaskEditor({
                                 ["play", "target", 1],
                                 ""
                               );
-                              if (!val && !oldY) {
-                                if (d.play) delete d.play.target;
-                              } else {
-                                setByPath(
-                                  d,
-                                  ["play", "target"],
-                                  [val, oldY || ""]
-                                );
-                              }
+                              setByPath(
+                                d,
+                                ["play", "target"],
+                                [val, oldY || ""]
+                              );
                             });
                           }}
                           className="font-mono text-xs h-8"
@@ -847,15 +1009,11 @@ export default function TaskEditor({
                                 ["play", "target", 0],
                                 ""
                               );
-                              if (!val && !oldX) {
-                                if (d.play) delete d.play.target;
-                              } else {
-                                setByPath(
-                                  d,
-                                  ["play", "target"],
-                                  [oldX || "", val]
-                                );
-                              }
+                              setByPath(
+                                d,
+                                ["play", "target"],
+                                [oldX || "", val]
+                              );
                             });
                           }}
                           className="font-mono text-xs h-8"
@@ -865,14 +1023,6 @@ export default function TaskEditor({
                   )}
                 </div>
 
-                {advMethod === "mouse_left" && (
-                  <div className="text-[10px] text-muted-foreground">
-                    * Target X/Y: 0.0 - 1.0 (relative to window). Leave empty to
-                    use Global Config.
-                  </div>
-                )}
-
-                {/* 👇👇👇 新增：分支列表区域 👇👇👇 */}
                 <div className="pt-4 border-t mt-4">
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex flex-col">
@@ -899,7 +1049,6 @@ export default function TaskEditor({
                     </Button>
                   </div>
 
-                  {/* 这里使用了 handleDragEndStep3 和 branches 变量 */}
                   <DndContext
                     sensors={sensors}
                     collisionDetection={closestCenter}
@@ -980,11 +1129,10 @@ export default function TaskEditor({
                     </SortableContext>
                   </DndContext>
                 </div>
-                {/* 👆👆👆 新增结束 👆👆👆 */}
               </div>
             )}
 
-            {/* Step 4 */}
+            {/* Step 4: End */}
             {step === 4 && (
               <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
                 <div className="flex items-center justify-between">
@@ -995,6 +1143,7 @@ export default function TaskEditor({
                     <div className="text-xs font-medium">End Template</div>
                     <div className="flex gap-2">
                       <TemplateSelect
+                        templates={templates}
                         value={endTpl}
                         onPick={(v) =>
                           apply((d) => setByPath(d, ["end", "template"], v))
@@ -1031,7 +1180,7 @@ export default function TaskEditor({
             )}
           </div>
         ) : (
-          /* Raw View */
+          /* Raw JSON View */
           <div className="space-y-2 animate-in fade-in zoom-in-95 duration-200">
             <Textarea
               className="h-[600px] font-mono text-xs leading-relaxed"
@@ -1073,19 +1222,18 @@ export default function TaskEditor({
         isOpen={pickerOpen}
         onClose={() => setPickerOpen(false)}
         apiBase={apiBase}
-        // 从当前配置或全局配置里拿 window_title
-        // 这里需要传递一个有效的 window_title 给后端截图
-        // 假设我们在 ConfigTab 里配过，或者 TaskEditor 也有 context
-        // 简单起见，我们暂且认为 user 需要在 Config 里配好。
-        // 或者我们可以传一个默认值/让后端自己去 Config 查。
-        // 建议：直接让 PointPicker 传空 windowTitle，由后端默认去 Active Game Config 查。
         windowTitle=""
         onPick={(x, y) => {
-          // 保留4位小数即可
           const sx = x.toFixed(4);
           const sy = y.toFixed(4);
           apply((d) => setByPath(d, ["play", "target"], [sx, sy]));
         }}
+      />
+      <SaveTemplateDialog
+        isOpen={saveTplOpen}
+        onClose={() => setSaveTplOpen(false)}
+        apiBase={apiBase}
+        taskContent={task}
       />
     </>
   );

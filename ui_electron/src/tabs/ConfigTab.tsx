@@ -286,12 +286,12 @@ export function ConfigTab({ apiBase, ok, onSaved }: Props) {
 
   return (
     <Card className="flex flex-col overflow-hidden border-none shadow-sm">
-      {/* --- New Header --- */}
+      {/* --- Header --- */}
       <div className="flex items-center justify-between px-6 py-4 border-b bg-muted/20">
         <div className="flex flex-col gap-1">
           <h2 className="text-lg font-semibold tracking-tight flex items-center gap-2">
             <Cpu className="w-5 h-5 text-primary" />
-            Engine Configuration
+            Global Settings / 全局配置
           </h2>
           <div
             className="flex items-center gap-2 text-xs text-muted-foreground font-mono"
@@ -315,7 +315,7 @@ export function ConfigTab({ apiBase, ok, onSaved }: Props) {
             <RotateCcw
               className={`w-4 h-4 mr-2 ${busy ? "animate-spin" : ""}`}
             />
-            Discard / Reload
+            Reload
           </Button>
           <Button
             onClick={onSave}
@@ -344,29 +344,29 @@ export function ConfigTab({ apiBase, ok, onSaved }: Props) {
         ) : (
           <Accordion
             type="multiple"
-            defaultValue={["game", "obs"]}
+            defaultValue={["game", "audio", "obs"]}
             className="w-full space-y-4"
           >
-            {/* 1. Game & Window (Most Important) */}
+            {/* 1. Game & Window */}
             <AccordionItem value="game" className="border rounded-md px-4">
               <AccordionTrigger className="hover:no-underline py-3">
                 <span className="font-semibold text-sm">
-                  Game Window Settings
+                  1. Target Application / 目标程序
                 </span>
               </AccordionTrigger>
               <AccordionContent className="pb-4 pt-1">
                 <div className="grid gap-6">
                   <div>
                     <Field
-                      label="game_window_title"
+                      label="Window Title (窗口标题)"
                       value={getIn(cfg, "game_window_title", "")}
                       onChange={(v) => update("game_window_title", v)}
                       placeholder="e.g. Genshin Impact"
-                      desc="Exact or partial window title used to find and activate the game window. (Required)"
+                      desc="Runner 将根据此标题查找并激活游戏窗口 (支持模糊匹配)"
                     />
                     {!titleOk && (
                       <div className="text-xs text-destructive mt-1 font-medium">
-                        * This field is required by the runner.
+                        * 此项为必填项 (Required)
                       </div>
                     )}
                   </div>
@@ -374,131 +374,160 @@ export function ConfigTab({ apiBase, ok, onSaved }: Props) {
               </AccordionContent>
             </AccordionItem>
 
-            {/* 2. OBS */}
+            {/* 2. Audio & Smart VAD */}
+            <AccordionItem value="audio" className="border rounded-md px-4">
+              <AccordionTrigger className="hover:no-underline py-3">
+                <span className="font-semibold text-sm flex items-center gap-2">
+                  2. Audio & Smart VAD / 智能语音
+                  {getIn(cfg, "audio.enabled", false) ? (
+                    <Badge variant="default" className="text-[10px] h-5">
+                      ON
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="text-[10px] h-5">
+                      OFF
+                    </Badge>
+                  )}
+                </span>
+              </AccordionTrigger>
+              <AccordionContent className="pb-4 pt-1">
+                <div className="grid gap-4">
+                  <BoolField
+                    label="Enable Audio Agent (启用音频代理)"
+                    checked={Boolean(getIn(cfg, "audio.enabled", false))}
+                    onCheckedChange={(v) => update("audio.enabled", v)}
+                    desc="启用后将加载 VAD 模型监听游戏语音。关闭则仅使用固定时间轴。"
+                  />
+                  {/* 这里未来可以添加全局默认的 threshold/silence 配置 */}
+                </div>
+              </AccordionContent>
+            </AccordionItem>
+
+            {/* 3. OBS */}
             <AccordionItem value="obs" className="border rounded-md px-4">
               <AccordionTrigger className="hover:no-underline py-3">
-                <span className="font-semibold text-sm">OBS Connection</span>
+                <span className="font-semibold text-sm">3. OBS Connection</span>
               </AccordionTrigger>
               <AccordionContent className="pb-4 pt-1">
                 <div className="grid gap-4 md:grid-cols-2">
                   <Field
-                    label="obs.host"
+                    label="Host IP"
                     value={getIn(cfg, "obs.host", "127.0.0.1")}
                     onChange={(v) => update("obs.host", v)}
-                    desc="OBS WebSocket IP (Default: 127.0.0.1)"
+                    desc="OBS WebSocket IP (通常为 127.0.0.1)"
                   />
                   <NumField
-                    label="obs.port"
+                    label="Port"
                     value={getIn(cfg, "obs.port", 4455)}
                     onChange={(v) => update("obs.port", v)}
                     step={1}
-                    desc="OBS WebSocket Port (Default: 4455)"
+                    desc="OBS WebSocket Port (默认 4455)"
                   />
                   <Field
-                    label="obs.password"
+                    label="Password"
                     value={getIn(cfg, "obs.password", "")}
                     onChange={(v) => update("obs.password", v)}
-                    desc="WebSocket Password (Optional if disabled in OBS)"
+                    desc="OBS WebSocket 密码 (如果未设置则留空)"
                     type="password"
                   />
                   <div className="md:col-span-2 grid gap-4 md:grid-cols-2">
                     <Field
-                      label="obs.output_raw_dir"
+                      label="Raw Output Dir (录制缓存)"
                       value={getIn(cfg, "obs.output_raw_dir", "")}
                       onChange={(v) => update("obs.output_raw_dir", v)}
-                      desc="Directory for raw recordings (Leave empty for OBS default)"
+                      desc="OBS 原始录像保存路径 (留空则使用 OBS 默认设置)"
                     />
                     <Field
-                      label="obs.output_final_dir"
+                      label="Final Output Dir (最终成品)"
                       value={getIn(cfg, "obs.output_final_dir", "")}
                       onChange={(v) => update("obs.output_final_dir", v)}
-                      desc="Directory for renamed/processed files (Optional)"
+                      desc="重命名后的成品 MKV 保存路径"
                     />
                   </div>
                 </div>
               </AccordionContent>
             </AccordionItem>
 
-            {/* 3. Play & Pacing */}
+            {/* 4. Play & Pacing */}
             <AccordionItem value="play" className="border rounded-md px-4">
               <AccordionTrigger className="hover:no-underline py-3">
                 <span className="font-semibold text-sm">
-                  Play Loop & Pacing
+                  4. Automation & Pacing / 自动化参数
                 </span>
               </AccordionTrigger>
               <AccordionContent className="pb-4 pt-1">
                 <div className="grid gap-4 md:grid-cols-3">
                   <NumField
-                    label="play.max_steps"
+                    label="Max Steps (安全熔断)"
                     value={getIn(cfg, "play.max_steps", 2000)}
                     onChange={(v) => update("play.max_steps", v)}
                     step={1}
-                    desc="Safety limit for max steps per task"
+                    desc="单任务最大执行步数，防止死循环 (默认 2000)"
                   />
                   <NumField
-                    label="play.pacing_system_sec"
+                    label="System Pacing Interval (s)"
                     value={getIn(cfg, "play.pacing_system_sec", 0.35)}
                     onChange={(v) => update("play.pacing_system_sec", v)}
                     step={0.01}
-                    desc="Base interval for system pacing (seconds)"
+                    desc="[System模式可用] 每次点击的默认间隔时间"
                   />
                   <NumField
-                    label="play.jitter_sec"
+                    label="Human Jitter (s)"
                     value={getIn(cfg, "play.jitter_sec", 0.0)}
                     onChange={(v) => update("play.jitter_sec", v)}
                     step={0.01}
-                    desc="Random jitter added to each step (humanization)"
+                    desc="随机抖动时间 (±秒)，用于模拟真人操作"
                   />
                 </div>
               </AccordionContent>
             </AccordionItem>
 
-            {/* 4. End Detection */}
+            {/* 5. End Detection */}
             <AccordionItem value="end" className="border rounded-md px-4">
               <AccordionTrigger className="hover:no-underline py-3">
                 <span className="font-semibold text-sm">
-                  End Condition Detection
+                  5. End Detection / 结束判定
                 </span>
               </AccordionTrigger>
               <AccordionContent className="pb-4 pt-1">
                 <div className="grid gap-4 md:grid-cols-2">
                   <NumField
-                    label="end_detection.end_template_thr"
+                    label="End Image Confidence"
                     value={getIn(cfg, "end_detection.end_template_thr", 0.86)}
                     onChange={(v) =>
                       update("end_detection.end_template_thr", v)
                     }
                     step={0.01}
-                    desc="Confidence threshold for end image match (0.0 - 1.0)"
+                    desc="END 图标的匹配相似度阈值 (0.0 - 1.0)"
                   />
                   <NumField
-                    label="end_detection.end_hits_need"
+                    label="Required Consecutive Hits"
                     value={getIn(cfg, "end_detection.end_hits_need", 3)}
                     onChange={(v) => update("end_detection.end_hits_need", v)}
                     step={1}
-                    desc="Consecutive matches required to stop"
+                    desc="连续检测到多少次 END 图标才停止 (防闪烁)"
                   />
                   <NumField
-                    label="end_detection.min_play_sec"
+                    label="Min Play Duration (s)"
                     value={getIn(cfg, "end_detection.min_play_sec", 2.0)}
                     onChange={(v) => update("end_detection.min_play_sec", v)}
                     step={0.1}
-                    desc="Minimum duration before checking end condition"
+                    desc="任务开始后多少秒内不进行结束判定"
                   />
                   <NumField
-                    label="end_detection.check_every_steps"
+                    label="Check Frequency (steps)"
                     value={getIn(cfg, "end_detection.check_every_steps", 1)}
                     onChange={(v) =>
                       update("end_detection.check_every_steps", v)
                     }
                     step={1}
-                    desc="Check frequency (steps)"
+                    desc="每隔多少步进行一次图像检测 (性能优化)"
                   />
                 </div>
               </AccordionContent>
             </AccordionItem>
 
-            {/* 5. Advanced UI/Vision Settings */}
+            {/* 6. Advanced Vision */}
             <AccordionItem value="advanced" className="border rounded-md px-4">
               <AccordionTrigger className="hover:no-underline py-3">
                 <span className="font-semibold text-sm">
@@ -508,76 +537,76 @@ export function ConfigTab({ apiBase, ok, onSaved }: Props) {
               <AccordionContent className="pb-4 pt-1">
                 <div className="space-y-4">
                   <h4 className="text-xs font-bold uppercase text-muted-foreground tracking-wider">
-                    Vision Thresholds
+                    Thresholds / 识别阈值
                   </h4>
                   <div className="grid gap-4 md:grid-cols-3">
                     <NumField
-                      label="vision.enter_template_thr"
+                      label="Entry Match %"
                       value={getIn(cfg, "vision.enter_template_thr", 0.8)}
                       onChange={(v) => update("vision.enter_template_thr", v)}
                       step={0.01}
-                      desc="Threshold for Entry button"
+                      desc="入口按钮(回想/画廊)的匹配阈值"
                     />
                     <NumField
-                      label="vision.action_template_thr"
+                      label="Action Match %"
                       value={getIn(cfg, "vision.action_template_thr", 0.8)}
                       onChange={(v) => update("vision.action_template_thr", v)}
                       step={0.01}
-                      desc="Threshold for Preplay actions"
+                      desc="分支选项/动作图标的匹配阈值"
                     />
                     <NumField
-                      label="vision.retry_sleep_sec"
+                      label="Retry Interval (s)"
                       value={getIn(cfg, "vision.retry_sleep_sec", 0.25)}
                       onChange={(v) => update("vision.retry_sleep_sec", v)}
                       step={0.01}
-                      desc="Wait time between retries"
+                      desc="找图失败时的重试间隔"
                     />
                   </div>
 
                   <Separator />
 
                   <h4 className="text-xs font-bold uppercase text-muted-foreground tracking-wider">
-                    UI Interaction
+                    Interaction / 交互保护
                   </h4>
                   <div className="grid gap-4 md:grid-cols-2">
                     <NumField
-                      label="ui.click_interval_sec"
+                      label="Min Click Interval (s)"
                       value={getIn(cfg, "ui.click_interval_sec", 0.35)}
                       onChange={(v) => update("ui.click_interval_sec", v)}
                       step={0.01}
-                      desc="Global minimum click interval"
+                      desc="硬件保护：任意两次点击间的最小物理间隔"
                     />
                     <NumField
-                      label="ui.countdown_sec"
+                      label="Countdown (s)"
                       value={getIn(cfg, "ui.countdown_sec", 3)}
                       onChange={(v) => update("ui.countdown_sec", v)}
                       step={1}
-                      desc="Countdown before starting"
+                      desc="开始运行前的倒计时"
                     />
                     <BoolField
-                      label="ui.enter_double_click"
+                      label="Entry Double Click"
                       checked={Boolean(
                         getIn(cfg, "ui.enter_double_click", true)
                       )}
                       onCheckedChange={(v) =>
                         update("ui.enter_double_click", v)
                       }
-                      desc="Double click on entry button?"
+                      desc="点击入口时是否双击 (部分游戏需要)"
                     />
                     <BoolField
-                      label="ui.disable_failsafe"
+                      label="Disable Mouse Failsafe"
                       checked={Boolean(
                         getIn(cfg, "ui.disable_failsafe", false)
                       )}
                       onCheckedChange={(v) => update("ui.disable_failsafe", v)}
-                      desc="Disable mouse corner fail-safe (Dangerous)"
+                      desc="[危险] 禁用鼠标甩到角落强制停止的功能"
                     />
                   </div>
                 </div>
               </AccordionContent>
             </AccordionItem>
 
-            {/* 6. Template Management (Replaced the top banner) */}
+            {/* 7. Template Management */}
             <AccordionItem
               value="templates"
               className="border rounded-md px-4 border-dashed bg-muted/10"
@@ -585,7 +614,7 @@ export function ConfigTab({ apiBase, ok, onSaved }: Props) {
               <AccordionTrigger className="hover:no-underline py-3">
                 <span className="font-semibold text-sm flex items-center gap-2">
                   <Layers className="w-4 h-4" />
-                  Template Management (Advanced)
+                  Template Defaults / 全局模板
                 </span>
               </AccordionTrigger>
               <AccordionContent className="pb-4 pt-1">
@@ -597,8 +626,8 @@ export function ConfigTab({ apiBase, ok, onSaved }: Props) {
                       </h4>
                       <p className="text-xs text-muted-foreground">
                         {defaultExists
-                          ? "Template file exists."
-                          : "No template set yet."}
+                          ? "已存在默认模板文件。"
+                          : "暂无默认模板。"}
                         {defaultPath && (
                           <span className="font-mono ml-1 opacity-70">
                             ({defaultPath})
@@ -623,11 +652,11 @@ export function ConfigTab({ apiBase, ok, onSaved }: Props) {
                   <div className="flex items-center justify-between">
                     <div className="text-xs text-muted-foreground">
                       <p className="font-medium mb-1">
-                        Apply Default Template to this Game
+                        Apply Default to this Game
                       </p>
                       <p>
-                        Merge fills missing fields. Replace overwrites
-                        everything (except window title).
+                        Merge (合并): 仅填充缺失项。 Replace (替换):
+                        覆盖除窗口标题外的所有设置。
                       </p>
                     </div>
                     <div className="flex gap-2">
@@ -643,11 +672,7 @@ export function ConfigTab({ apiBase, ok, onSaved }: Props) {
                         variant="destructive"
                         size="sm"
                         onClick={() => {
-                          if (
-                            confirm(
-                              "This will overwrite your current configuration. Continue?"
-                            )
-                          )
+                          if (confirm("确定要覆盖当前配置吗？此操作不可撤销。"))
                             onApplyDefault("replace");
                         }}
                         disabled={!defaultExists}

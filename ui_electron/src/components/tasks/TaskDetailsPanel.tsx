@@ -1,4 +1,4 @@
-import TaskEditor from "@/TaskEditor";
+import TaskEditor from "@/components/tasks/TaskEditor";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { MousePointerClick } from "lucide-react";
 

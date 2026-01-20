@@ -1,39 +1,63 @@
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, ipcMain, screen } from "electron";
 import path from "path";
 import fs from "fs";
 import { spawn, ChildProcessWithoutNullStreams } from "child_process";
 import { fileURLToPath } from "url";
+import Store from "electron-store"; // 🟢 1. 引入 Store
+
+// 初始化 Store
+const store = new Store();
 
 let win: BrowserWindow | null = null;
 let pyProc: ChildProcessWithoutNullStreams | null = null;
 let roiWin: BrowserWindow | null = null;
 
-// ESM 下没有 __dirname，这样取
+// ESM 下没有 __dirname
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// 这里的 __dirname = ui_electron/dist-electron (编译后)
-// PROJECT_BASE = 回到项目根目录 gameCG_recoder
 const PROJECT_BASE = path.resolve(__dirname, "..", "..");
 const RUNTIME_PATH = path.join(PROJECT_BASE, ".galrec", "runtime.json");
 
+// 🟢 4. 单实例锁：防止打开两个程序冲突
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (win) {
+      if (win.isMinimized()) win.restore();
+      win.focus();
+    }
+  });
+}
+
+// --- ROI Overlay Logic ---
 function openRoiOverlay() {
   if (roiWin) {
     roiWin.focus();
     return;
   }
 
+  // 获取鼠标所在屏幕的尺寸
+  const cursorPoint = screen.getCursorScreenPoint();
+  const display = screen.getDisplayNearestPoint(cursorPoint);
+
   roiWin = new BrowserWindow({
-    fullscreen: true,
+    x: display.bounds.x,
+    y: display.bounds.y,
+    width: display.bounds.width,
+    height: display.bounds.height,
+    fullscreen: true, // 全屏覆盖
     frame: false,
     transparent: true,
     resizable: false,
     alwaysOnTop: true,
     skipTaskbar: true,
-    // 需要接收鼠标拖拽，所以必须 focusable
     focusable: true,
     hasShadow: false,
     webPreferences: {
+      // 指向你的 roi preload
       preload: path.join(__dirname, "roi", "preload_roi.js"),
       contextIsolation: true,
       nodeIntegration: false,
@@ -41,6 +65,7 @@ function openRoiOverlay() {
   });
 
   roiWin.setAlwaysOnTop(true, "screen-saver");
+  // 指向你的 roi html
   roiWin.loadFile(path.join(__dirname, "roi", "roi_overlay.html"));
 
   roiWin.on("closed", () => {
@@ -48,6 +73,50 @@ function openRoiOverlay() {
   });
 }
 
+// --- Python Process Logic ---
+function findPythonExe(): string {
+  const fromEnv = process.env.GALREC_PYTHON;
+  if (fromEnv && fromEnv.trim()) return fromEnv.trim();
+
+  const venvPy = path.join(PROJECT_BASE, ".venv", "Scripts", "python.exe");
+  if (fs.existsSync(venvPy)) return venvPy;
+
+  const condaPrefix = process.env.CONDA_PREFIX;
+  if (condaPrefix) {
+    const condaPy = path.join(condaPrefix, "python.exe");
+    if (fs.existsSync(condaPy)) return condaPy;
+  }
+
+  return process.platform === "win32" ? "python" : "python3";
+}
+
+function startPythonApi() {
+  if (pyProc) return; // 防止重复启动
+
+  const pythonExe = findPythonExe();
+  const serverPath = path.join(PROJECT_BASE, "api", "server.py");
+
+  console.log("[Electron] Starting Python:", pythonExe);
+
+  pyProc = spawn(pythonExe, [serverPath], {
+    cwd: PROJECT_BASE,
+    stdio: "pipe",
+  });
+
+  pyProc.stdout.on("data", (d) => console.log("[PY]", d.toString().trim()));
+  pyProc.stderr.on("data", (d) => console.log("[PY-ERR]", d.toString().trim()));
+  pyProc.on("exit", (code) => console.log("[PY] exited code:", code));
+}
+
+function stopPythonApi() {
+  if (pyProc && !pyProc.killed) {
+    console.log("[Electron] Killing Python process...");
+    pyProc.kill();
+    pyProc = null;
+  }
+}
+
+// --- Helper ---
 function sleep(ms: number) {
   return new Promise((res) => setTimeout(res, ms));
 }
@@ -62,122 +131,104 @@ async function waitForApiReady(
         const raw = fs.readFileSync(RUNTIME_PATH, "utf-8");
         const obj = JSON.parse(raw);
         if (obj.api_base) {
-          // ✅ 关键：探测 /health 是否真的通
           try {
             const r = await fetch(`${obj.api_base}/health`);
             const j = await r.json();
             if (j && j.ok) return obj;
-          } catch {
-            // health 还没 ready，继续等
-          }
+          } catch {}
         }
       }
     } catch {}
     await sleep(150);
   }
-  throw new Error("API not ready (runtime.json or /health timeout)");
+  throw new Error("API not ready");
 }
 
-function findPythonExe(): string {
-  // 1) 允许你临时用环境变量指定（可选）
-  const fromEnv = process.env.GALREC_PYTHON;
-  if (fromEnv && fromEnv.trim()) return fromEnv.trim();
-
-  // 2) 优先使用项目内 .venv（如果你是 venv 路线）
-  const venvPy = path.join(PROJECT_BASE, ".venv", "Scripts", "python.exe");
-  if (fs.existsSync(venvPy)) return venvPy;
-
-  // 3) 如果你是 conda，通常会有 CONDA_PREFIX
-  const condaPrefix = process.env.CONDA_PREFIX;
-  if (condaPrefix) {
-    const condaPy = path.join(condaPrefix, "python.exe");
-    if (fs.existsSync(condaPy)) return condaPy;
-  }
-
-  // 4) 兜底：系统 python
-  return process.platform === "win32" ? "python" : "python3";
-}
-
-function startPythonApi() {
-  const pythonExe = findPythonExe();
-  const serverPath = path.join(PROJECT_BASE, "api", "server.py");
-
-  console.log("[Electron] PROJECT_BASE =", PROJECT_BASE);
-  console.log("[Electron] RUNTIME_PATH =", RUNTIME_PATH);
-  console.log("[Electron] Using python =", pythonExe);
-
-  pyProc = spawn(pythonExe, [serverPath], {
-    cwd: PROJECT_BASE,
-    stdio: "pipe",
-  });
-
-  pyProc.stdout.on("data", (d) => console.log("[PY]", d.toString().trim()));
-  pyProc.stderr.on("data", (d) => console.log("[PY-ERR]", d.toString().trim()));
-  pyProc.on("exit", (code) => console.log("[PY] exited", code));
-}
-
-function stopPythonApi() {
-  if (pyProc && !pyProc.killed) pyProc.kill();
-  pyProc = null;
-}
-
+// --- Main Window ---
 async function createWindow() {
   const preloadPath = path.join(__dirname, "preload.js");
+  if (!fs.existsSync(preloadPath)) throw new Error("preload.js missing");
 
-  console.log("[Electron] preloadPath =", preloadPath);
-  if (!fs.existsSync(preloadPath)) {
-    // 直接终止，避免默默失败
-    throw new Error("preload.js not found: " + preloadPath);
-  }
+  // 🟢 1. 从 Store 读取上次的位置和大小
+  const bounds: any = store.get("windowBounds", {
+    width: 1440,
+    height: 900,
+  });
 
   win = new BrowserWindow({
-    width: 1100,
-    height: 720,
+    width: bounds.width,
+    height: bounds.height,
+    x: bounds.x, // 如果 undefined，Electron 会自动居中
+    y: bounds.y,
+    minWidth: 1024, // 建议设置最小宽度，防止布局崩坏
+    minHeight: 720,
+    autoHideMenuBar: true, // 🟢 5. 隐藏默认菜单栏
+    frame: true, // 保持系统标题栏 (或者 false 用自定义)
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false, // ✅ 有些环境 sandbox 会阻止 preload，先关掉确保能跑
+      sandbox: false,
     },
   });
 
-  // ✅ 页面加载完，验证 window.galrec 是否存在（直接在渲染进程里执行一段 JS）
-  win.webContents.on("did-finish-load", async () => {
-    try {
-      const has = await win!.webContents.executeJavaScript(
-        "typeof window.galrec !== 'undefined'",
-        true
-      );
-      console.log("[Electron] window.galrec injected?", has);
-    } catch (e) {
-      console.log("[Electron] executeJavaScript check failed:", e);
-    }
-  });
+  // 🟢 1. 监听调整大小和移动，保存状态
+  const saveState = () => {
+    if (!win) return;
+    store.set("windowBounds", win.getBounds());
+  };
+  win.on("resize", saveState);
+  win.on("move", saveState);
 
   const devUrl = process.env.VITE_DEV_SERVER_URL;
   if (devUrl) {
     await win.loadURL(devUrl);
-    win.webContents.openDevTools({ mode: "detach" });
+    // win.webContents.openDevTools({ mode: "detach" }); // 开发时可开启
   } else {
-    await win.loadURL("about:blank");
+    // 生产环境加载 index.html
+    win.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   }
 }
+
+// --- App Lifecycle ---
 
 app.on("window-all-closed", () => {
   stopPythonApi();
   if (process.platform !== "darwin") app.quit();
 });
 
+// 🟢 3. 额外保险：退出前清理进程
+app.on("before-quit", () => {
+  stopPythonApi();
+});
+
 app.whenReady().then(async () => {
   startPythonApi();
 
-  try {
-    const rt = await waitForApiReady(15000);
-    ipcMain.handle("galrec:getApiBase", async () => rt.api_base);
-  } catch (e: any) {
-    ipcMain.handle("galrec:getApiBase", async () => "");
-    console.error("[Electron] Failed to read runtime.json:", e?.message || e);
-  }
+  // IPC Handlers
+  ipcMain.handle("galrec:getApiBase", async () => {
+    try {
+      const rt = await waitForApiReady(15000);
+      return rt.api_base;
+    } catch (e) {
+      console.error(e);
+      return "";
+    }
+  });
+
+  // 🟢 2. 注册 ROI 相关的 IPC (让前端能调起截图层)
+  ipcMain.handle("galrec:openRoiOverlay", () => {
+    openRoiOverlay();
+    return true;
+  });
+
+  ipcMain.handle("galrec:closeRoiOverlay", () => {
+    if (roiWin) {
+      roiWin.close();
+      roiWin = null;
+    }
+    return true;
+  });
 
   await createWindow();
 });

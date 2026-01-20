@@ -31,9 +31,9 @@ def _seq_dir(root: str) -> str:
     os.makedirs(p, exist_ok=True)
     return p
 
-
-def _tpl_dir(root: str) -> str:
-    p = os.path.join(root, "templates")
+# 🟢 新增：模板存储目录
+def _task_tpl_dir(root: str) -> str:
+    p = os.path.join(root, "task_templates")
     os.makedirs(p, exist_ok=True)
     return p
 
@@ -51,15 +51,6 @@ def _queue_path(root: str) -> str:
 # ----------------------------
 
 def normalize_seq(sid: int, d: dict) -> dict:
-    """
-    对齐 runner.py 的 normalize_seq
-    schema:
-      entry: {mode: gallery|roam, template: "001_entry.png" 或绝对路径}
-      preplay: {actions: [{template, delay, appear_timeout_sec?}, ...]}
-      play: {advance_method: mouse_left|enter, pacing: system|audio, mode: default}
-      end: {template: "001_end.png"}
-      record: {basename: "..."}
-    """
     if not isinstance(d, dict):
         d = {}
     d = dict(d)
@@ -85,8 +76,6 @@ def normalize_seq(sid: int, d: dict) -> dict:
             delay = 0.5
 
         item = {"template": tpl, "delay": delay}
-
-        # 可选：appear_timeout_sec
         try:
             ato = float(a.get("appear_timeout_sec", 0.0) or 0.0)
         except Exception:
@@ -116,7 +105,7 @@ def normalize_seq(sid: int, d: dict) -> dict:
 
 
 # ----------------------------
-# queue helpers (optional)
+# Helpers
 # ----------------------------
 
 def _load_queue_order(root: str) -> List[int]:
@@ -186,10 +175,69 @@ class PutQueueReq(BaseModel):
 class CreateTaskReq(BaseModel):
     id: Optional[int] = None
     name: str = ""
+    basename: str = ""  # 🟢 New: 允许指定文件名
+    template_name: Optional[str] = None # 🟢 New: 允许从模板创建
 
 
 class PutProgressReq(BaseModel):
     progress: Dict[str, Any]
+
+class SaveTemplateReq(BaseModel):
+    name: str
+    content: Dict[str, Any]
+
+
+# ----------------------------
+# Task Templates APIs (New)
+# ----------------------------
+
+@router.get("/task_templates")
+def get_task_templates():
+    """列出所有已保存的任务模板"""
+    root = _active_root()
+    tdir = _task_tpl_dir(root)
+    templates = []
+    for fp in glob.glob(os.path.join(tdir, "*.yaml")):
+        stem = os.path.splitext(os.path.basename(fp))[0]
+        templates.append(stem)
+    templates.sort()
+    return {"templates": templates}
+
+@router.post("/task_templates")
+def save_task_template(req: SaveTemplateReq):
+    """保存当前任务配置为模板"""
+    root = _active_root()
+    tdir = _task_tpl_dir(root)
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(400, "template name required")
+    
+    # 防止路径穿越
+    safe_name = os.path.basename(name)
+    path = os.path.join(tdir, f"{safe_name}.yaml")
+    
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(req.content, f, allow_unicode=True, sort_keys=False)
+    except Exception as e:
+        raise HTTPException(500, f"failed to save template: {e}")
+        
+    return {"ok": True, "name": safe_name}
+
+@router.delete("/task_templates/{name}")
+def delete_task_template(name: str):
+    root = _active_root()
+    tdir = _task_tpl_dir(root)
+    safe_name = os.path.basename(name)
+    path = os.path.join(tdir, f"{safe_name}.yaml")
+    
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+        except Exception as e:
+            raise HTTPException(500, f"failed to delete: {e}")
+            
+    return {"ok": True}
 
 
 # ----------------------------
@@ -218,7 +266,7 @@ def get_tasks():
                 pass
 
         st = tasks_state.get(f"{sid:03d}", {}) or {}
-        status = str(st.get("status", "")).strip()  # done/running/failed/...
+        status = str(st.get("status", "")).strip()
 
         out.append({
             "id": sid,
@@ -259,7 +307,6 @@ def put_task(sid: int, body: Dict[str, Any]):
     except Exception as e:
         raise HTTPException(500, f"failed to save task {sid:03d}: {e}")
 
-    # 维持 queue.yaml（可选；你未来想去掉也行）
     order = _load_queue_order(root)
     if sid not in order:
         order.append(sid)
@@ -272,6 +319,7 @@ def put_task(sid: int, body: Dict[str, Any]):
 def create_task(req: CreateTaskReq):
     root = _active_root()
 
+    # 1. 确定 ID
     if req.id is None:
         used = set(_list_disk_ids(root))
         sid = 1
@@ -284,13 +332,42 @@ def create_task(req: CreateTaskReq):
     if os.path.exists(p):
         raise HTTPException(400, f"task {sid:03d} already exists")
 
-    d = normalize_seq(sid, {"name": (req.name.strip() or f"CG_{sid:03d}")})
+    # 2. 准备初始内容
+    initial_content = {}
+    
+    # 🟢 如果指定了模板，尝试加载模板内容
+    if req.template_name:
+        tpl_path = os.path.join(_task_tpl_dir(root), f"{req.template_name}.yaml")
+        if os.path.exists(tpl_path):
+            try:
+                with open(tpl_path, "r", encoding="utf-8") as f:
+                    initial_content = yaml.safe_load(f) or {}
+            except Exception as e:
+                print(f"[Warn] Failed to load template {req.template_name}: {e}")
+
+    # 3. 覆盖关键字段 (ID, Name, Basename)
+    initial_content["id"] = sid
+    
+    # Name
+    final_name = req.name.strip() or initial_content.get("name") or f"CG_{sid:03d}"
+    initial_content["name"] = final_name
+    
+    # Basename (位于 record.basename)
+    rec = initial_content.get("record", {})
+    if not isinstance(rec, dict): rec = {}
+    final_basename = req.basename.strip() or rec.get("basename") or final_name
+    rec["basename"] = final_basename
+    initial_content["record"] = rec
+
+    # 4. 规范化并保存
+    d = normalize_seq(sid, initial_content)
     try:
         with open(p, "w", encoding="utf-8") as f:
             yaml.safe_dump(d, f, allow_unicode=True, sort_keys=False)
     except Exception as e:
         raise HTTPException(500, f"failed to create task {sid:03d}: {e}")
 
+    # 5. 加入队列
     order = _load_queue_order(root)
     if sid not in order:
         order.append(sid)
@@ -303,7 +380,6 @@ def create_task(req: CreateTaskReq):
 def delete_task(sid: int):
     root = _active_root()
 
-    # 1) 删除 yaml
     try:
         os.remove(_seq_file(root, sid))
     except FileNotFoundError:
@@ -311,15 +387,6 @@ def delete_task(sid: int):
     except Exception as e:
         raise HTTPException(500, f"failed to delete yaml: {e}")
 
-    # 2) 删除 templates/{sid:03d}_*
-    tdir = _tpl_dir(root)
-    for fp in glob.glob(os.path.join(tdir, f"{sid:03d}_*")):
-        try:
-            os.remove(fp)
-        except Exception:
-            pass
-
-    # 3) progress.json 清理 task
     prog = load_progress()
     if isinstance(prog, dict):
         tasks = prog.get("tasks", {}) or {}
@@ -328,7 +395,6 @@ def delete_task(sid: int):
             prog["tasks"] = tasks
             save_progress(prog)
 
-    # 4) queue.yaml 移除
     order = [x for x in _load_queue_order(root) if x != sid]
     _save_queue_order(root, order)
 
@@ -336,7 +402,7 @@ def delete_task(sid: int):
 
 
 # ----------------------------
-# Queue APIs (still useful for reorder)
+# Queue APIs
 # ----------------------------
 
 @router.get("/queue")
@@ -348,7 +414,6 @@ def get_queue():
 @router.put("/queue")
 def put_queue(req: PutQueueReq):
     root = _active_root()
-
     order = []
     seen = set()
     for x in req.order:
@@ -357,18 +422,17 @@ def put_queue(req: PutQueueReq):
             continue
         order.append(x)
         seen.add(x)
-
     _save_queue_order(root, order)
     return {"ok": True, "order": order}
 
 
 # ----------------------------
-# Progress APIs (UI 需要 Reset/RunSelected 等)
+# Progress APIs
 # ----------------------------
 
 @router.get("/progress")
 def get_progress():
-    _active_root()  # ensure set_game_root
+    _active_root()
     return load_progress()
 
 
@@ -395,9 +459,6 @@ def reset_task_status(sid: int):
 
 @router.post("/progress/run_only/{sid}")
 def set_run_only(sid: int):
-    """
-    给 runner 用：只跑某个 sid（runner.py 会读取 progress["run_only"]）
-    """
     _active_root()
     prog = load_progress()
     prog["run_only"] = [f"{int(sid):03d}"]

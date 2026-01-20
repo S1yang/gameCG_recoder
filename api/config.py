@@ -175,7 +175,7 @@ def _runner_default_config() -> Dict[str, Any]:
 
         # ===== audio =====
         "audio": {
-            "enabled": False,
+            "enabled": True,
         },
     }
 

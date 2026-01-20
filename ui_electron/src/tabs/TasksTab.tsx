@@ -3,6 +3,7 @@ import { useTasks } from "@/hooks/useTasks";
 import TasksActionsBar from "@/components/tasks/TasksActionsBar";
 import TasksListPanel from "@/components/tasks/TasksListPanel";
 import TaskDetailsPanel from "@/components/tasks/TaskDetailsPanel";
+import { NewTaskDialog } from "@/components/tasks/NewTaskDialog";
 
 type Props = { apiBase: string; ok: boolean };
 
@@ -22,11 +23,9 @@ export function TasksTab({ apiBase, ok }: Props) {
     busyRunOnly,
     refreshAll,
     loadOne,
-    createTask,
     deleteTask,
     saveTask,
     saveQueue,
-    moveInQueue,
     resetStatus,
     runOnly,
     setStatusBatch,
@@ -39,21 +38,21 @@ export function TasksTab({ apiBase, ok }: Props) {
   const [raw, setRaw] = useState<string>("");
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
 
-  // --- 👇 新增：自动刷新逻辑 👇 ---
-  // 当窗口重新获得焦点（例如 runner 跑完自动切回来，或用户手动切回来）时，自动刷新列表
+  // 🟢 Dialog State
+  const [createOpen, setCreateOpen] = useState(false);
+
+  // --- 自动刷新 ---
   useEffect(() => {
     const onFocus = () => {
       if (apiBase && ok) {
         refreshAll();
       }
     };
-
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [apiBase, ok, refreshAll]);
-  // --- 👆 新增结束 👆 ---
 
-  // ... (初始化逻辑保持不变)
+  // --- 初始化加载 ---
   useEffect(() => {
     if (apiBase && ok) {
       refreshAll().then(({ tasks: list }) => {
@@ -75,7 +74,7 @@ export function TasksTab({ apiBase, ok }: Props) {
     }
   }, [selectedId]);
 
-  // ... (逻辑函数保持不变) ...
+  // --- 排序与筛选 ---
   const tasksOrdered = useMemo(() => {
     const map = new Map(tasks.map((t) => [t.id, t]));
     const ordered: typeof tasks = [];
@@ -94,17 +93,53 @@ export function TasksTab({ apiBase, ok }: Props) {
     [tasksOrdered, selectedId]
   );
 
+  // 🟢 计算建议ID
+  const nextId = useMemo(() => {
+    if (tasks.length === 0) return 1;
+    const maxId = Math.max(...tasks.map((t) => t.id));
+    return maxId + 1;
+  }, [tasks]);
+
+  // --- 动作处理 ---
   const onRefresh = async () => {
     await refreshAll();
   };
+
+  // 🟢 改为打开对话框
   const onCreate = async () => {
-    const id = await createTask();
-    await onRefresh();
-    if (id) {
-      setSelectedId(id);
-      setSelectedIds(new Set([id]));
+    setCreateOpen(true);
+  };
+
+  // 🟢 实际创建请求
+  const handleCreateSubmit = async (data: {
+    name: string;
+    basename: string;
+    template: string;
+  }) => {
+    try {
+      const res = await fetch(`${apiBase}/tasks`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: data.name,
+          basename: data.basename,
+          template_name: data.template || undefined,
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const j = await res.json();
+
+      await onRefresh();
+      if (j.id) {
+        setSelectedId(j.id);
+        setSelectedIds(new Set([j.id]));
+      }
+    } catch (e: any) {
+      console.error(e);
+      throw e;
     }
   };
+
   const onDelete = async () => {
     if (!selectedId) return;
     if (!confirm(`Delete task ${selectedId}?`)) return;
@@ -116,6 +151,8 @@ export function TasksTab({ apiBase, ok }: Props) {
     });
     await onRefresh();
   };
+
+  // ... 其他 handler 保持不变 ...
   const onReorder = async (order: number[]) => {
     await saveQueue(order);
     await refreshAll();
@@ -172,11 +209,8 @@ export function TasksTab({ apiBase, ok }: Props) {
     await startRunner();
   };
 
-  // --- 🔥 新的布局结构 ---
   return (
-    // 使用固定高度容器，配合 Flex 布局实现左右独立滚动
     <div className="flex flex-col gap-2 h-[calc(100vh-140px)] min-h-[600px]">
-      {/* 顶部工具栏 */}
       <div className="flex-none">
         <TasksActionsBar
           ok={ok}
@@ -198,9 +232,7 @@ export function TasksTab({ apiBase, ok }: Props) {
         />
       </div>
 
-      {/* 主体：左右分栏 */}
       <div className="flex-1 flex overflow-hidden border rounded-md bg-background shadow-sm">
-        {/* 左侧：任务列表 (300px 固定宽) */}
         <div className="w-[300px] flex-none border-r flex flex-col">
           <TasksListPanel
             ok={ok}
@@ -219,7 +251,6 @@ export function TasksTab({ apiBase, ok }: Props) {
           />
         </div>
 
-        {/* 右侧：编辑器 (自适应宽度) */}
         <div className="flex-1 min-w-0 bg-card/50">
           <TaskDetailsPanel
             apiBase={apiBase}
@@ -234,6 +265,15 @@ export function TasksTab({ apiBase, ok }: Props) {
           />
         </div>
       </div>
+
+      {/* 🟢 Dialog */}
+      <NewTaskDialog
+        isOpen={createOpen}
+        onClose={() => setCreateOpen(false)}
+        apiBase={apiBase}
+        nextId={nextId}
+        onCreate={handleCreateSubmit}
+      />
     </div>
   );
 }
