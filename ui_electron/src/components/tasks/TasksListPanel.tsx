@@ -176,13 +176,19 @@ export default function TasksListPanel({
   };
 
   return (
-    <div className="h-full flex flex-col bg-muted/10">
+    /** * 修改点 1: 确保父容器 h-full 且 overflow-hidden。
+     * 这样可以防止整个面板把页面撑长，而是把压力给到内部的 ScrollArea。
+     */
+    <div className="h-full flex flex-col bg-muted/10 overflow-hidden border-r">
+      {/* 头部固定，不参与滚动 */}
       <div className="flex-none p-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider border-b">
         Queue ({items.length})
       </div>
 
-      <ScrollArea className="flex-1">
-        <div className="p-2">
+      <ScrollArea className="flex-1 min-h-0 w-full">
+        <div className="p-2 space-y-1">
+          {" "}
+          {/* 增加 space-y-1 优化间距 */}
           <DndContext
             sensors={sensors}
             collisionDetection={closestCenter}
@@ -206,6 +212,8 @@ export default function TasksListPanel({
               No tasks created.
             </div>
           )}
+          {/* 增加一点底部留白，防止滚动到底部时最后一个任务贴边 */}
+          <div className="h-4" />
         </div>
       </ScrollArea>
     </div>
