@@ -36,6 +36,7 @@ export type TaskItem = {
   basename?: string;
   out?: string;
   error?: string;
+  group?: string;
 };
 
 export function useTasks(apiBase: string) {

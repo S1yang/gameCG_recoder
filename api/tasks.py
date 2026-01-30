@@ -101,6 +101,12 @@ def normalize_seq(sid: int, d: dict) -> dict:
     rec.setdefault("basename", d.get("name", f"CG_{sid:03d}"))
     d["record"] = rec
 
+    g = d.get("group", "")
+    if isinstance(g, str):
+        d["group"] = g.strip()
+    else:
+        d["group"] = ""
+
     return d
 
 
@@ -268,6 +274,15 @@ def get_tasks():
         st = tasks_state.get(f"{sid:03d}", {}) or {}
         status = str(st.get("status", "")).strip()
 
+        group = ""
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    d = yaml.safe_load(f) or {}
+                group = str(d.get("group", "")).strip()
+            except Exception:
+                pass
+
         out.append({
             "id": sid,
             "name": name,
@@ -275,7 +290,9 @@ def get_tasks():
             "basename": st.get("basename", ""),
             "out": st.get("out", ""),
             "error": st.get("error", ""),
+            "group": group, 
         })
+
 
     return {"root": root, "tasks": out}
 
