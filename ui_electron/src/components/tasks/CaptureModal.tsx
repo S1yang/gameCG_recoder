@@ -1,8 +1,20 @@
 // src/components/tasks/CaptureModal.tsx
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Loader2, Crop, X } from "lucide-react";
 import { createPortal } from "react-dom";
+
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Input } from "@/components/ui/input";
 
 // 简单的 API 辅助函数（为了保持组件独立，这里保留一份）
 async function apiPost(base: string, path: string, body: any) {
@@ -24,6 +36,25 @@ interface CaptureModalProps {
   onSaved: (finalName: string) => void;
 }
 
+function sanitizeFilename(input: string) {
+  // Windows 不允许: \ / : * ? " < > |
+  // 同时去掉控制字符 & 末尾空格/点
+  const trimmed = (input ?? "").trim();
+  if (!trimmed) return "";
+  const replaced = trimmed
+    .replace(/[\\/:*?"<>|]/g, "_")
+    .replace(/[\u0000-\u001F]/g, "_")
+    .replace(/[. ]+$/g, ""); // 末尾点或空格在 Windows 也不行
+  return replaced;
+}
+
+function ensurePngExt(name: string) {
+  if (!name) return name;
+  // 如果用户自己写了扩展名就尊重；否则补 .png
+  if (/\.[a-zA-Z0-9]{1,6}$/.test(name)) return name;
+  return `${name}.png`;
+}
+
 export function CaptureModal({
   isOpen,
   onClose,
@@ -37,6 +68,10 @@ export function CaptureModal({
   const [frameId, setFrameId] = useState("");
   const [imgSrc, setImgSrc] = useState("");
   const [error, setError] = useState("");
+
+  // 命名对话框状态
+  const [nameDialogOpen, setNameDialogOpen] = useState(false);
+  const [pendingName, setPendingName] = useState("");
 
   // 裁剪区域状态 (Image Coordinates)
   const [roi, setRoi] = useState<{
@@ -57,15 +92,27 @@ export function CaptureModal({
 
   const imgRef = useRef<HTMLImageElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const defaultName = useMemo(() => {
+    // 外部传入 suggestedName 作为默认名
+    return suggestedName || `tpl_${Math.floor(Date.now() / 1000)}.png`;
+  }, [suggestedName]);
 
   // 1. 初始化：请求截图
   useEffect(() => {
     if (!isOpen) return;
+
     setStep("loading");
     setError("");
+    setFrameId("");
+    setImgSrc("");
     setRoi(null);
     setDragStart(null);
     setDragCurrent(null);
+
+    // 初始化 pendingName 为默认名（打开就有值）
+    setPendingName(defaultName);
 
     (async () => {
       try {
@@ -84,16 +131,24 @@ export function CaptureModal({
         window.focus();
       }
     })();
-  }, [isOpen, apiBase]);
+  }, [isOpen, apiBase, defaultName]);
 
-  // 2. 保存逻辑
-  const handleSave = async () => {
+  // 2. 真正保存逻辑（带 finalName）
+  const doSave = async (finalNameRaw: string) => {
     if (!roi || !frameId) return;
+
+    // 允许用户清空：则回退默认名
+    let name = sanitizeFilename(finalNameRaw);
+    if (!name) name = sanitizeFilename(defaultName) || defaultName;
+    name = ensurePngExt(name);
+
     setStep("saving");
+    setError("");
+
     try {
       const res = await apiPost(apiBase, "/templates/crop_save", {
         frame_id: frameId,
-        name: suggestedName,
+        name,
         x: roi.x,
         y: roi.y,
         w: roi.w,
@@ -105,6 +160,19 @@ export function CaptureModal({
       setError(e.message || "Failed to save crop");
       setStep("cropping");
     }
+  };
+
+  // 点击 Save：先弹出命名对话框
+  const handleSaveClick = () => {
+    if (!roi || !frameId) return;
+    setPendingName(defaultName);
+    setNameDialogOpen(true);
+
+    // 下一帧聚焦输入框
+    requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    });
   };
 
   // --- Mouse Handlers for Cropping ---
@@ -165,7 +233,7 @@ export function CaptureModal({
   if (!isOpen) return null;
 
   // 计算当前拖拽的遮罩样式
-  let dragStyle = {};
+  let dragStyle: any = {};
   if (dragStart && dragCurrent) {
     const left = Math.min(dragStart.x, dragCurrent.x);
     const top = Math.min(dragStart.y, dragCurrent.y);
@@ -194,26 +262,32 @@ export function CaptureModal({
             Capture & Crop
           </div>
           <div className="flex gap-2">
-            <Button variant="ghost" size="sm" onClick={onClose}>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onClose}
+              disabled={step === "saving"}
+            >
               <X className="w-4 h-4 mr-1" /> Cancel
             </Button>
 
-            {/* ▼▼▼ 修改点：只显示 Save，不显示文件名 ▼▼▼ */}
             <Button
               size="sm"
-              onClick={handleSave}
+              onClick={handleSaveClick}
               disabled={!roi || step === "saving"}
+              title={
+                !roi ? "Drag to select a region first" : "Save cropped region"
+              }
             >
               {step === "saving" && (
                 <Loader2 className="w-4 h-4 mr-1 animate-spin" />
               )}
               Save
             </Button>
-            {/* ▲▲▲ 修改结束 ▲▲▲ */}
           </div>
         </div>
 
-        {/* Body 保持不变 */}
+        {/* Body */}
         <div
           className="flex-1 overflow-auto bg-neutral-900 flex items-center justify-center p-4 select-none"
           ref={containerRef}
@@ -261,6 +335,56 @@ export function CaptureModal({
             </div>
           )}
         </div>
+
+        {/* 命名对话框：Save 时弹出 */}
+        <AlertDialog open={nameDialogOpen} onOpenChange={setNameDialogOpen}>
+          <AlertDialogContent className="z-[10050]">
+            <AlertDialogHeader>
+              <AlertDialogTitle>Save capture as</AlertDialogTitle>
+              <AlertDialogDescription>
+                你可以自定义文件名；留空将使用默认名称。
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+
+            <div className="space-y-2">
+              <Input
+                ref={inputRef}
+                value={pendingName}
+                onChange={(e) => setPendingName(e.target.value)}
+                placeholder={defaultName}
+                disabled={step === "saving"}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    setNameDialogOpen(false);
+                    doSave(pendingName);
+                  }
+                }}
+              />
+              <div className="text-xs text-muted-foreground">
+                默认：<span className="font-mono">{defaultName}</span>
+                <span className="ml-2 opacity-70">
+                  （自动补 .png，非法字符会替换为 _）
+                </span>
+              </div>
+            </div>
+
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={step === "saving"}>
+                Cancel
+              </AlertDialogCancel>
+              <AlertDialogAction
+                disabled={step === "saving"}
+                onClick={() => {
+                  setNameDialogOpen(false);
+                  doSave(pendingName);
+                }}
+              >
+                Save
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
     </div>,
     document.body

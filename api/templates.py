@@ -15,8 +15,10 @@ import uuid
 from typing import Dict, Tuple
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Query
-from fastapi.responses import FileResponse,Response
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
+
+import re
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
@@ -35,6 +37,7 @@ ALLOWED_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 _FRAME_CACHE: Dict[str, Tuple[float, "np.ndarray"]] = {}
 _FRAME_TTL_SEC = 60.0  # 1分钟足够你框选
 
+
 def _active_root() -> str:
     root = GameRegistry(BASE_DIR).resolve_active_root()
     set_game_root(root)
@@ -47,16 +50,105 @@ def _tpl_dir(root: str) -> str:
     return p
 
 
+def _ext_ok(name: str) -> bool:
+    return os.path.splitext(name)[1].lower() in ALLOWED_EXT
+
+
+# Windows 不允许的文件名字符：\ / : * ? " < > |
+# 这里不禁止中文，只做非法字符替换 + 去掉末尾点/空格 + 防路径穿越
+_WIN_ILLEGAL = r'<>:"/\\|?*'
+
+
 def _safe_basename(name: str) -> str:
-    # 防止路径穿越，只允许 basename
-    name = os.path.basename(name).strip()
+    """
+    防止路径穿越，只允许 basename；不限制中文。
+    同时清理 Windows 非法字符、末尾点/空格，避免保存失败。
+    """
+    name = os.path.basename(name or "").strip()
     if not name:
         raise ValueError("empty filename")
+
+    # 替换非法字符（保留中文）
+    name = re.sub(f"[{re.escape(_WIN_ILLEGAL)}]", "_", name)
+
+    # 去掉控制字符
+    name = re.sub(r"[\x00-\x1F]", "_", name)
+
+    # 去掉末尾点/空格（Windows 不允许）
+    name = name.rstrip(" .")
+
+    if not name:
+        raise ValueError("empty filename after sanitize")
+
+    # Windows 保留名（不区分大小写）
+    base_no_ext = os.path.splitext(name)[0].upper()
+    reserved = {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    }
+    if base_no_ext in reserved:
+        name = f"_{name}"
+
     return name
 
 
-def _ext_ok(name: str) -> bool:
-    return os.path.splitext(name)[1].lower() in ALLOWED_EXT
+def _ensure_ext(name: str, default_ext: str = ".png") -> str:
+    ext = os.path.splitext(name)[1]
+    if ext == "":
+        return name + default_ext
+    return name
+
+
+def _unique_name(tdir: str, filename: str) -> str:
+    base, ext = os.path.splitext(filename)
+    cand = filename
+    i = 1
+    while os.path.exists(os.path.join(tdir, cand)):
+        cand = f"{base}_{i}{ext}"
+        i += 1
+    return cand
+
+
+def _imread_any(path: str, flags=cv2.IMREAD_COLOR) -> "np.ndarray":
+    """
+    更稳健的读图：兼容 Windows 中文/Unicode 路径。
+    使用 np.fromfile + cv2.imdecode 绕过 cv2.imread 的路径编码问题。
+    """
+    data = np.fromfile(path, dtype=np.uint8)
+    if data is None or data.size == 0:
+        return None
+    img = cv2.imdecode(data, flags)
+    return img
+
+def _imwrite_any(path: str, img: "np.ndarray", ext: str, params=None) -> None:
+    """
+    更稳健的写图：兼容 Windows 中文/Unicode 路径。
+    使用 cv2.imencode + ndarray.tofile 绕过 cv2.imwrite 的路径编码问题。
+    ext 需要以 .png/.jpg/.webp/.bmp 等形式传入。
+    """
+    if params is None:
+        params = []
+
+    ext = (ext or ".png").lower()
+    if ext == ".jpeg":
+        ext = ".jpg"
+
+    # 针对不同格式给默认参数（可按需调整）
+    if not params:
+        if ext == ".jpg":
+            params = [int(cv2.IMWRITE_JPEG_QUALITY), 95]
+        elif ext == ".webp":
+            params = [int(cv2.IMWRITE_WEBP_QUALITY), 90]
+        else:
+            params = []
+
+    ok, buf = cv2.imencode(ext, img, params)
+    if not ok or buf is None:
+        raise IOError(f"cv2.imencode failed for ext={ext}")
+
+    # numpy.ndarray.tofile 对 Unicode 路径更友好
+    buf.tofile(path)
 
 
 def _open_in_explorer(path: str):
@@ -83,18 +175,9 @@ def _load_game_config(root: str) -> dict:
         return yaml.safe_load(f) or {}
 
 
-def _unique_name(tdir: str, filename: str) -> str:
-    base, ext = os.path.splitext(filename)
-    cand = filename
-    i = 1
-    while os.path.exists(os.path.join(tdir, cand)):
-        cand = f"{base}_{i}{ext}"
-        i += 1
-    return cand
-
-
 class DeleteReq(BaseModel):
     name: str
+
 
 class CaptureRoiReq(BaseModel):
     name: Optional[str] = None
@@ -107,6 +190,7 @@ class CaptureFrameReq(BaseModel):
     sleep_ms: int = 250
     restore_app_title: Optional[str] = None  # 新增：告诉后端截完图要激活谁
 
+
 class CropSaveReq(BaseModel):
     frame_id: str
     name: str
@@ -114,6 +198,7 @@ class CropSaveReq(BaseModel):
     y: int
     w: int
     h: int
+
 
 class CaptureReq(BaseModel):
     name: Optional[str] = None        # 例如 "001_entry.png"，也可以不传
@@ -145,6 +230,7 @@ def get_template_file(name: str = Query(...)) -> FileResponse:
     """
     root = _active_root()
     tdir = _tpl_dir(root)
+
     try:
         bn = _safe_basename(name)
     except Exception as e:
@@ -167,7 +253,10 @@ async def upload_template(file: UploadFile = File(...), name: Optional[str] = No
     tdir = _tpl_dir(root)
 
     filename = name.strip() if isinstance(name, str) and name.strip() else file.filename
-    filename = _safe_basename(filename)
+    try:
+        filename = _safe_basename(filename)
+    except Exception as e:
+        raise HTTPException(400, str(e))
 
     if not _ext_ok(filename):
         raise HTTPException(400, f"unsupported file ext: {filename}")
@@ -214,7 +303,12 @@ def open_template(req: DeleteReq) -> dict:
     """在系统文件管理器中定位该模板文件（方便你人工核对）"""
     root = _active_root()
     tdir = _tpl_dir(root)
-    name = _safe_basename(req.name)
+
+    try:
+        name = _safe_basename(req.name)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
     fp = os.path.join(tdir, name)
     try:
         _open_in_explorer(fp)
@@ -256,28 +350,33 @@ def capture_window(req: CaptureReq) -> dict:
     except Exception as e:
         raise HTTPException(500, f"capture failed: {e}")
 
-    if img is None:
+    if img is None or img.size == 0:
         raise HTTPException(500, "capture failed: empty image")
 
     # 3) 命名
     filename = req.name.strip() if isinstance(req.name, str) and req.name.strip() else ""
-    if filename:
-        filename = _safe_basename(filename)
-        # 没后缀就补 .png
-        if os.path.splitext(filename)[1] == "":
-            filename += ".png"
-        if not _ext_ok(filename):
-            raise HTTPException(400, f"unsupported file ext: {filename}")
-    else:
-        filename = time.strftime("capture_%Y%m%d_%H%M%S.png")
+    try:
+        if filename:
+            filename = _safe_basename(filename)
+            filename = _ensure_ext(filename, ".png")
+            if not _ext_ok(filename):
+                raise HTTPException(400, f"unsupported file ext: {filename}")
+        else:
+            filename = time.strftime("capture_%Y%m%d_%H%M%S.png")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, str(e))
 
     filename = _unique_name(tdir, filename)
 
-    # 4) 写文件
+    # 4) 写文件（按扩展名编码）
     dst = os.path.join(tdir, filename)
-    ok = cv2.imwrite(dst, img)
-    if not ok:
-        raise HTTPException(500, "cv2.imwrite failed")
+    ext = os.path.splitext(filename)[1].lower()
+    try:
+        _imwrite_any(dst, img, ext=ext)
+    except Exception as e:
+        raise HTTPException(500, f"write image failed: {e}")
 
     return {
         "ok": True,
@@ -287,6 +386,7 @@ def capture_window(req: CaptureReq) -> dict:
         "window_title": title_kw,
         "size": [int(img.shape[1]), int(img.shape[0])],
     }
+
 
 @router.get("/thumb")
 def get_template_thumb(
@@ -314,9 +414,9 @@ def get_template_thumb(
     if not os.path.exists(path):
         raise HTTPException(404, f"template not found: {bn}")
 
-    img = cv2.imread(path, cv2.IMREAD_COLOR)
+    img = _imread_any(path, cv2.IMREAD_COLOR)
     if img is None:
-        raise HTTPException(500, "cv2.imread failed")
+        raise HTTPException(500, "imread failed")
 
     h, ww = img.shape[:2]
     if ww <= 0 or h <= 0:
@@ -346,6 +446,7 @@ def get_template_thumb(
 
     return Response(content=buf.tobytes(), media_type=mime)
 
+
 @router.post("/capture_roi")
 def capture_roi(req: CaptureRoiReq) -> dict:
     """
@@ -363,30 +464,30 @@ def capture_roi(req: CaptureRoiReq) -> dict:
     if not title_kw:
         raise HTTPException(400, "config missing: game_window_title")
 
-    # 激活窗口（你已经修复成 force 版本也行）
+    # 激活窗口
     if req.bring_to_front:
         try:
-            activate_window_force(title_kw)  # 如果你没导入 force 就换成 activate_window
+            activate_window_force(title_kw)
             time.sleep(max(0, int(req.sleep_ms)) / 1000.0)
         except Exception as e:
             raise HTTPException(500, f"activate_window failed: {e}")
 
-    # 读窗口 rect（只在窗口区域内选 ROI，会更符合预期）
+    # 读窗口 rect
     try:
         rect = find_window_rect(title_kw)
     except Exception as e:
         raise HTTPException(500, f"find_window_rect failed: {e}")
 
-    # 截窗口区域（先截整个窗口，再在这张图上选 ROI）
+    # 截窗口区域
     try:
         img = grab_region_bgr(rect.left, rect.top, rect.width, rect.height)
     except Exception as e:
         raise HTTPException(500, f"grab_region_bgr failed: {e}")
 
-    if img is None:
+    if img is None or img.size == 0:
         raise HTTPException(500, "capture failed: empty image")
 
-    # OpenCV ROI 选择（会弹窗，需要你拖选后回车/空格确认，ESC取消）
+    # OpenCV ROI 选择
     try:
         vis = img.copy()
         roi = cv2.selectROI("Select ROI (Enter/Space=OK, Esc=Cancel)", vis, showCrosshair=True, fromCenter=False)
@@ -398,26 +499,33 @@ def capture_roi(req: CaptureRoiReq) -> dict:
     if w <= 1 or h <= 1:
         raise HTTPException(400, "ROI canceled or too small")
 
-    crop = img[y:y+h, x:x+w]
+    crop = img[y:y + h, x:x + w]
     if crop is None or crop.size == 0:
         raise HTTPException(500, "ROI crop empty")
 
     # 命名
     filename = req.name.strip() if isinstance(req.name, str) and req.name.strip() else ""
-    if filename:
-        filename = _safe_basename(filename)
-        if os.path.splitext(filename)[1] == "":
-            filename += ".png"
-        if not _ext_ok(filename):
-            raise HTTPException(400, f"unsupported file ext: {filename}")
-    else:
-        filename = time.strftime("roi_%Y%m%d_%H%M%S.png")
-    filename = _unique_name(tdir, filename)
+    try:
+        if filename:
+            filename = _safe_basename(filename)
+            filename = _ensure_ext(filename, ".png")
+            if not _ext_ok(filename):
+                raise HTTPException(400, f"unsupported file ext: {filename}")
+        else:
+            filename = time.strftime("roi_%Y%m%d_%H%M%S.png")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, str(e))
 
+    filename = _unique_name(tdir, filename)
     dst = os.path.join(tdir, filename)
-    ok = cv2.imwrite(dst, crop)
-    if not ok:
-        raise HTTPException(500, "cv2.imwrite failed")
+
+    ext = os.path.splitext(filename)[1].lower()
+    try:
+        _imwrite_any(dst, crop, ext=ext)
+    except Exception as e:
+        raise HTTPException(500, f"write image failed: {e}")
 
     return {
         "ok": True,
@@ -435,6 +543,7 @@ def _prune_frames():
     dead = [k for k, (ts, _) in _FRAME_CACHE.items() if (now - ts) > _FRAME_TTL_SEC]
     for k in dead:
         _FRAME_CACHE.pop(k, None)
+
 
 @router.post("/frame")
 def capture_frame(req: CaptureFrameReq) -> dict:
@@ -466,15 +575,13 @@ def capture_frame(req: CaptureFrameReq) -> dict:
         if req.restore_app_title:
             try:
                 activate_window_force(req.restore_app_title)
-            except:
+            except Exception:
                 pass
         raise HTTPException(500, f"capture failed: {e}")
 
-    # C. 【关键修复】截图完成后，立刻把 Electron 窗口拉回前台
+    # C. 截图完成后把 Electron 窗口拉回前台
     if req.restore_app_title:
         try:
-            # 稍微等一下，让系统反应过来
-            # time.sleep(0.1) 
             activate_window_force(req.restore_app_title)
         except Exception as e:
             print(f"[Warn] failed to restore app window: {e}")
@@ -497,6 +604,7 @@ def capture_frame(req: CaptureFrameReq) -> dict:
         "size": [int(img.shape[1]), int(img.shape[0])],
         "image_b64": "data:image/png;base64," + b64,
     }
+
 
 @router.post("/crop_save")
 def crop_save(req: CropSaveReq) -> dict:
@@ -526,22 +634,27 @@ def crop_save(req: CropSaveReq) -> dict:
     w = max(1, min(w, W - x))
     h = max(1, min(h, H - y))
 
-    crop = img[y:y+h, x:x+w]
+    crop = img[y:y + h, x:x + w]
     if crop is None or crop.size == 0:
         raise HTTPException(500, "ROI crop empty")
 
-    filename = _safe_basename(req.name)
-    if os.path.splitext(filename)[1] == "":
-        filename += ".png"
+    try:
+        filename = _safe_basename(req.name)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+    filename = _ensure_ext(filename, ".png")
     if not _ext_ok(filename):
         raise HTTPException(400, f"unsupported file ext: {filename}")
 
     filename = _unique_name(tdir, filename)
     dst = os.path.join(tdir, filename)
 
-    ok = cv2.imwrite(dst, crop)
-    if not ok:
-        raise HTTPException(500, "cv2.imwrite failed")
+    ext = os.path.splitext(filename)[1].lower()
+    try:
+        _imwrite_any(dst, crop, ext=ext)
+    except Exception as e:
+        raise HTTPException(500, f"write image failed: {e}")
 
     return {
         "ok": True,
@@ -550,4 +663,3 @@ def crop_save(req: CropSaveReq) -> dict:
         "roi": [x, y, w, h],
         "size": [int(crop.shape[1]), int(crop.shape[0])],
     }
-

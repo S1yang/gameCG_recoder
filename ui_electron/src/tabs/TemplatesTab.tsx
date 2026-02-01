@@ -166,7 +166,7 @@ export function TemplatesTab({ apiBase, ok }: Props) {
         <div className="flex flex-wrap items-center justify-between gap-2 px-1">
           {/* Left: Title & Selection Status */}
           <div className="flex items-center gap-3">
-            <h3 className="font-semibold text-lg">Templates</h3>
+            <h3 className="font-semibold text-lg">图片库 / Image Assets</h3>
             <Badge variant="secondary" className="text-xs font-normal">
               {items.length}
             </Badge>
@@ -203,7 +203,7 @@ export function TemplatesTab({ apiBase, ok }: Props) {
 
             {/* Add New Group */}
             <div className="flex items-center gap-2 bg-muted/30 p-1 rounded-md border border-border/50">
-              <span className="text-[10px] uppercase font-bold text-muted-foreground px-2">
+              <span className="text-[11px] uppercase font-bold text-muted-foreground px-2">
                 Add New
               </span>
 
@@ -224,7 +224,7 @@ export function TemplatesTab({ apiBase, ok }: Props) {
                 size="sm"
                 onClick={handleOpenCaptureModal}
                 disabled={busy}
-                title="Capture a region from the game window"
+                title="从游戏窗口中截取图片并保存"
                 className="h-8"
               >
                 <Crop className="w-3.5 h-3.5 mr-1.5" />
