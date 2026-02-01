@@ -3,14 +3,47 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
     "electron:build": "tsc -p tsconfig.electron.json",
     "electron:watch": "tsc -p tsconfig.electron.json --watch",
-    "electron:dev": "concurrently -k \"npm run electron:watch\" \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron dist-electron/main.js\""
+    "electron:dev": "concurrently -k \"npm run electron:watch\" \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron dist-electron/main.js\"",
+    "dist:portable": "npm run build && npm run electron:build && electron-builder --dir"
+  },
+  "build": {
+    "appId": "com.galrec.app",
+    "productName": "GalRec",
+    "asar": true,
+    "npmRebuild": false,
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "public/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "backend",
+        "to": "backend"
+      }
+    ],
+    "asarUnpack": [
+      "backend/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    }
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

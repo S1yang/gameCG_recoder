@@ -4,7 +4,11 @@ console.log("[preload] loaded");
 
 contextBridge.exposeInMainWorld("galrec", {
   getApiBase: async () => ipcRenderer.invoke("galrec:getApiBase"),
-  openRoi: () => ipcRenderer.invoke("roi-open"),
+
+  // ✅ 对齐 main.ts 的 channel
+  openRoi: async () => ipcRenderer.invoke("galrec:openRoiOverlay"),
+  closeRoi: async () => ipcRenderer.invoke("galrec:closeRoiOverlay"),
+
   onRoiResult: (
     cb: (roi: null | { x: number; y: number; w: number; h: number }) => void
   ) => {

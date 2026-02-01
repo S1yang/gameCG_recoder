@@ -3,9 +3,8 @@ import path from "path";
 import fs from "fs";
 import { spawn, ChildProcessWithoutNullStreams } from "child_process";
 import { fileURLToPath } from "url";
-import Store from "electron-store"; // 🟢 1. 引入 Store
+import Store from "electron-store";
 
-// 初始化 Store
 const store = new Store();
 
 let win: BrowserWindow | null = null;
@@ -16,10 +15,50 @@ let roiWin: BrowserWindow | null = null;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// dev 下用项目根
 const PROJECT_BASE = path.resolve(__dirname, "..", "..");
-const RUNTIME_PATH = path.join(PROJECT_BASE, ".galrec", "runtime.json");
 
-// 🟢 4. 单实例锁：防止打开两个程序冲突
+// ===================== ✅ 关键：构建版后端目录定位 =====================
+function getBackendExePath(): string {
+  return path.join(
+    process.resourcesPath,
+    "backend",
+    "galrec_api",
+    "galrec_api.exe"
+  );
+}
+
+/**
+ * 你喜欢的落盘位置是：
+ * resources/backend/galrec_api/_internal/.galrec/...
+ * 所以这里把 build 的 base_dir 固定到 _internal。
+ *
+ * 注意：这个 _internal 是 PyInstaller onedir 默认会有的目录（装 python 依赖/动态库）。
+ * 如果你未来改了 spec 或目录名，只要改这里一个地方即可。
+ */
+function getBackendBaseDir(): string {
+  // build 才有 resourcesPath
+  const backendRoot = path.join(process.resourcesPath, "backend", "galrec_api");
+
+  // ✅ 优先用 _internal（与你现在的 runner.log 路径一致）
+  const internalDir = path.join(backendRoot, "_internal");
+  if (fs.existsSync(internalDir)) return internalDir;
+
+  // 兜底：没有 _internal 就用 backendRoot
+  return backendRoot;
+}
+
+function getRuntimePath(): string {
+  // ✅ dev：保持原行为
+  if (!app.isPackaged) {
+    return path.join(PROJECT_BASE, ".galrec", "runtime.json");
+  }
+
+  // ✅ build：从后端自己的 base_dir 里读
+  return path.join(getBackendBaseDir(), ".galrec", "runtime.json");
+}
+
+// 🟢 单实例锁
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
   app.quit();
@@ -39,7 +78,6 @@ function openRoiOverlay() {
     return;
   }
 
-  // 获取鼠标所在屏幕的尺寸
   const cursorPoint = screen.getCursorScreenPoint();
   const display = screen.getDisplayNearestPoint(cursorPoint);
 
@@ -48,7 +86,7 @@ function openRoiOverlay() {
     y: display.bounds.y,
     width: display.bounds.width,
     height: display.bounds.height,
-    fullscreen: true, // 全屏覆盖
+    fullscreen: true,
     frame: false,
     transparent: true,
     resizable: false,
@@ -57,7 +95,6 @@ function openRoiOverlay() {
     focusable: true,
     hasShadow: false,
     webPreferences: {
-      // 指向你的 roi preload
       preload: path.join(__dirname, "roi", "preload_roi.js"),
       contextIsolation: true,
       nodeIntegration: false,
@@ -65,7 +102,6 @@ function openRoiOverlay() {
   });
 
   roiWin.setAlwaysOnTop(true, "screen-saver");
-  // 指向你的 roi html
   roiWin.loadFile(path.join(__dirname, "roi", "roi_overlay.html"));
 
   roiWin.on("closed", () => {
@@ -90,17 +126,49 @@ function findPythonExe(): string {
   return process.platform === "win32" ? "python" : "python3";
 }
 
+function getBackendCommand(): { cmd: string; args: string[]; cwd: string } {
+  const isDev = !app.isPackaged;
+
+  if (isDev) {
+    const pythonExe = findPythonExe();
+    const serverPath = path.join(PROJECT_BASE, "api", "server.py");
+    return { cmd: pythonExe, args: [serverPath], cwd: PROJECT_BASE };
+  }
+
+  const exe = getBackendExePath();
+  // ✅ 关键：让后端 cwd 就是 _internal（你喜欢的写入位置）
+  const cwd = getBackendBaseDir();
+  return { cmd: exe, args: [], cwd };
+}
+
 function startPythonApi() {
-  if (pyProc) return; // 防止重复启动
+  if (pyProc) return;
 
-  const pythonExe = findPythonExe();
-  const serverPath = path.join(PROJECT_BASE, "api", "server.py");
+  const { cmd, args, cwd } = getBackendCommand();
 
-  console.log("[Electron] Starting Python:", pythonExe);
+  const rtPath = getRuntimePath();
+  fs.mkdirSync(path.dirname(rtPath), { recursive: true });
 
-  pyProc = spawn(pythonExe, [serverPath], {
-    cwd: PROJECT_BASE,
+  console.log("[Electron] Starting Backend:", cmd);
+  console.log("[Electron] backend cwd:", cwd);
+  console.log("[Electron] runtime.json:", rtPath);
+
+  pyProc = spawn(cmd, args, {
+    cwd,
     stdio: "pipe",
+    env: {
+      ...process.env,
+
+      // ✅ 不搬家：只告诉后端“你的 base_dir 是哪里”
+      // dev 下就是 PROJECT_BASE；build 下就是 _internal
+      GALREC_BASE_DIR: cwd,
+
+      // ✅ runtime.json 也落在 base_dir/.galrec 下（你喜欢的结构）
+      // 这里传不传都行；传了可以让后端更确定
+      GALREC_RUNTIME_PATH: rtPath,
+
+      PYTHONUNBUFFERED: "1",
+    },
   });
 
   pyProc.stdout.on("data", (d) => console.log("[PY]", d.toString().trim()));
@@ -109,11 +177,17 @@ function startPythonApi() {
 }
 
 function stopPythonApi() {
-  if (pyProc && !pyProc.killed) {
-    console.log("[Electron] Killing Python process...");
-    pyProc.kill();
-    pyProc = null;
+  if (!pyProc) return;
+
+  const pid = pyProc.pid;
+  console.log("[Electron] Killing backend process...", pid);
+
+  if (process.platform === "win32" && pid) {
+    spawn("taskkill", ["/PID", String(pid), "/T", "/F"]);
+  } else {
+    pyProc.kill("SIGTERM");
   }
+  pyProc = null;
 }
 
 // --- Helper ---
@@ -125,6 +199,8 @@ async function waitForApiReady(
   timeoutMs = 15000
 ): Promise<{ api_base: string }> {
   const start = Date.now();
+  const RUNTIME_PATH = getRuntimePath();
+
   while (Date.now() - start < timeoutMs) {
     try {
       if (fs.existsSync(RUNTIME_PATH)) {
@@ -149,7 +225,6 @@ async function createWindow() {
   const preloadPath = path.join(__dirname, "preload.js");
   if (!fs.existsSync(preloadPath)) throw new Error("preload.js missing");
 
-  // 🟢 1. 从 Store 读取上次的位置和大小
   const bounds: any = store.get("windowBounds", {
     width: 1440,
     height: 900,
@@ -158,12 +233,12 @@ async function createWindow() {
   win = new BrowserWindow({
     width: bounds.width,
     height: bounds.height,
-    x: bounds.x, // 如果 undefined，Electron 会自动居中
+    x: bounds.x,
     y: bounds.y,
-    minWidth: 1024, // 建议设置最小宽度，防止布局崩坏
+    minWidth: 1024,
     minHeight: 720,
-    autoHideMenuBar: true, // 🟢 5. 隐藏默认菜单栏
-    frame: true, // 保持系统标题栏 (或者 false 用自定义)
+    autoHideMenuBar: true,
+    frame: true,
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,
@@ -172,7 +247,6 @@ async function createWindow() {
     },
   });
 
-  // 🟢 1. 监听调整大小和移动，保存状态
   const saveState = () => {
     if (!win) return;
     store.set("windowBounds", win.getBounds());
@@ -183,21 +257,17 @@ async function createWindow() {
   const devUrl = process.env.VITE_DEV_SERVER_URL;
   if (devUrl) {
     await win.loadURL(devUrl);
-    // win.webContents.openDevTools({ mode: "detach" }); // 开发时可开启
   } else {
-    // 生产环境加载 index.html
     win.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   }
 }
 
 // --- App Lifecycle ---
-
 app.on("window-all-closed", () => {
   stopPythonApi();
   if (process.platform !== "darwin") app.quit();
 });
 
-// 🟢 3. 额外保险：退出前清理进程
 app.on("before-quit", () => {
   stopPythonApi();
 });
@@ -205,7 +275,6 @@ app.on("before-quit", () => {
 app.whenReady().then(async () => {
   startPythonApi();
 
-  // IPC Handlers
   ipcMain.handle("galrec:getApiBase", async () => {
     try {
       const rt = await waitForApiReady(15000);
@@ -216,7 +285,6 @@ app.whenReady().then(async () => {
     }
   });
 
-  // 🟢 2. 注册 ROI 相关的 IPC (让前端能调起截图层)
   ipcMain.handle("galrec:openRoiOverlay", () => {
     openRoiOverlay();
     return true;

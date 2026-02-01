@@ -197,9 +197,7 @@ export default function App() {
               </span>
             </div>
             <div className="w-px h-3 bg-border" />
-            <span className="font-mono opacity-80">
-              PID: {window.process?.pid || "N/A"}
-            </span>
+            <span className="font-mono opacity-80">PID: {"N/A"}</span>
           </div>
           <div className="flex items-center gap-2 opacity-60">
             <Settings2 className="w-3.5 h-3.5" />
